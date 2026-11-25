@@ -90,7 +90,10 @@ def main():
                 code, out = pnp("submit", pos, timeout=600)
                 log("%s submit: %s" % (pos, out[-500:]))
                 subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
-                mark_done(pos)
+                if code == 0:
+                    mark_done(pos)
+                else:  # e.g. another agent's pull request came first: give the lease back, drop the file
+                    release(pos, "other")
                 time.sleep(a.interval); continue
             if r.returncode == 3:
                 release(gid, "statement_seems_false")  # its true twin is ours, checked by Lean
@@ -125,7 +128,10 @@ def main():
         code, out = pnp("submit", gid, timeout=600)
         log("%s submit: %s" % (gid, out[-500:]))
         subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
-        mark_done(gid)
+        if code == 0:
+            mark_done(gid)
+        else:  # e.g. another agent's pull request came first: give the lease back, drop the file
+            release(gid, "other")
         time.sleep(a.interval)
     log("time limit reached")
     return 0
