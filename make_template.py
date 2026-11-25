@@ -48,8 +48,34 @@ sub("(fun i => (3 : ℕ).testBit i.val) (fun _ => false)",
 sub("(fun i => (11 : ℕ).testBit i.val)", "(fun i => ({{Y1}} : ℕ).testBit i.val)", 1)
 sub(WITNESS, "{{WITNESS}}", 1)
 sub("have hws : witness.size = 9 := rfl", "have hws : witness.size = {{M}} := rfl", 1)
+# Generalize drop_one_var from "fix the input to false" to "fix it to a constant c": the argument is
+# the same for either constant, only the text says false. Inside that theorem only, every
+# insAt idx false / true becomes insAt idx c / (!c), except the hypothesis hdiff, and the last step
+# turns hdiff around when c is true.
+a = t.index("theorem drop_one_var {n : ℕ}")
+b = t.index("def target (x : Fin 6 → Bool)")
+blk = t[a:b]
+HD = "(hdiff : F (insAt idx false y_diff) ≠ F (insAt idx true y_diff))"
+for old, new, cnt in (
+        ("theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (F :", "theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (c : Bool) (F :", 1),
+        (HD, "@@HD@@", 1),
+        ("insAt idx (Sum.inl false)", "insAt idx (Sum.inl c)", 1),
+        ("insAt idx false", "insAt idx c", None),
+        ("insAt idx true", "insAt idx (!c)", None),
+        ("@@HD@@", HD, 1),
+        ("    exact hdiff (hf0.symm.trans (hsame.trans hf1))",
+         "    have hdiff' : F (insAt idx c y_diff) ≠ F (insAt idx (!c) y_diff) := by\n"
+         "      cases c\n      · exact hdiff\n      · exact fun h => hdiff h.symm\n"
+         "    exact hdiff' (hf0.symm.trans (hsame.trans hf1))", 1)):
+    n = blk.count(old)
+    if (cnt is not None and n != cnt) or n == 0:
+        sys.exit("template: drop_one_var: expected %s of %r, found %d" % (cnt, old, n))
+    blk = blk.replace(old, new)
+t = t[:a] + blk + t[b:]
+sub("insAt ({{IDX}} : Fin 6) false y", "insAt ({{IDX}} : Fin 6) {{C}} y", 1)
+sub("drop_one_var ({{IDX}} : Fin 6) target", "drop_one_var ({{IDX}} : Fin 6) {{C}} target", 1)
 for k in ("{{MOD}}", "{{STMT}}", "{{B}}", "{{F5}}", "{{ROWS5}}", "{{HI}}", "{{LO}}", "{{IDX}}", "{{YDIFF}}",
-          "{{Y0}}", "{{Y1}}", "{{WITNESS}}", "{{M}}"):
+          "{{Y0}}", "{{Y1}}", "{{WITNESS}}", "{{M}}", "{{C}}"):
     assert k in t, k
 # Comments are dropped: pnp.sh check removes them anyway; the credit line is in the generator's header.
 open(out, "w", encoding="utf-8").write(t)

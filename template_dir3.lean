@@ -903,15 +903,15 @@ def insAt {α : Type} {n : ℕ} (idx : Fin (n + 1)) (v : α) (y : Fin n → α) 
   else if h2 : k.val = idx.val then v
   else y ⟨k.val - 1, by omega⟩
 
-theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (F : (Fin (n + 1) → Bool) → Bool)
+theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (c : Bool) (F : (Fin (n + 1) → Bool) → Bool)
     (y_diff y0 y1 : Fin n → Bool)
     (hdiff : F (insAt idx false y_diff) ≠ F (insAt idx true y_diff))
-    (hnc : F (insAt idx false y0) ≠ F (insAt idx false y1))
+    (hnc : F (insAt idx c y0) ≠ F (insAt idx c y1))
     (gs : List Gate) (o : ℕ) (hg : ∀ g ∈ gs, legal g)
     (he : ∀ x : Fin (n + 1) → Bool, Circuit.eval ⟨gs, o⟩ (List.ofFn x) = F x) :
     ∃ (gs' : List Gate) (o' : ℕ), (∀ g ∈ gs', legal g) ∧ binaryCost gs' < binaryCost gs ∧
-      ∀ y : Fin n → Bool, Circuit.eval ⟨gs', o'⟩ (List.ofFn y) = F (insAt idx false y) := by
-  let initFn : Fin (n + 1) → Stat := insAt idx (Sum.inl false) (fun i : Fin n => Sum.inr i.val)
+      ∀ y : Fin n → Bool, Circuit.eval ⟨gs', o'⟩ (List.ofFn y) = F (insAt idx c y) := by
+  let initFn : Fin (n + 1) → Stat := insAt idx (Sum.inl c) (fun i : Fin n => Sum.inr i.val)
   let initSt : List Stat := List.ofFn initFn
   let res := elim n gs (initSt, [])
   have hgetFn : ∀ {α : Type} (f : Fin (n + 1) → α) (d : α) (i : ℕ) (hi : i < n + 1),
@@ -920,13 +920,13 @@ theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (F : (Fin (n + 1) → Bool) �
     rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem (by simp [hi]), Option.getD_some,
       List.getElem_ofFn]
   have hinv : ∀ y : Fin n → Bool,
-      Inv n (List.ofFn y) (List.ofFn (insAt idx false y)) (initSt, []) := by
+      Inv n (List.ofFn y) (List.ofFn (insAt idx c y)) (initSt, []) := by
     intro y
     refine ⟨by simp [initSt], ?_⟩
     intro i
     by_cases hi : i < n + 1
     · rw [show initSt.getD i (Sum.inl false) = initFn ⟨i, hi⟩ from hgetFn initFn _ i hi,
-          hgetFn (insAt idx false y) false i hi]
+          hgetFn (insAt idx c y) false i hi]
       dsimp only [initFn, insAt]
       by_cases h1 : i < idx.val
       · simp only [h1, ↓reduceDIte, statValid, statVal, wiresFrom, List.foldl_nil, List.length_nil, Nat.add_zero]
@@ -941,17 +941,17 @@ theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (F : (Fin (n + 1) → Bool) �
             Option.getD_some, List.getElem_ofFn]
     · have h1 : initSt.getD i (Sum.inl false) = Sum.inl false :=
         List.getD_eq_default _ _ (by simp [initSt]; omega)
-      have h2 : (List.ofFn (insAt idx false y)).getD i false = false :=
+      have h2 : (List.ofFn (insAt idx c y)).getD i false = false :=
         List.getD_eq_default _ _ (by simp; omega)
       rw [h1, h2]; simp [statValid, statVal]
   have heval : ∀ y : Fin n → Bool,
       statVal (wiresFrom res.2 (List.ofFn y)) (res.1.getD o (Sum.inl false)) =
-        F (insAt idx false y) := by
+        F (insAt idx c y) := by
     intro y
-    have hi := inv_elim n (List.ofFn y) (by simp) gs (List.ofFn (insAt idx false y)) (initSt, []) hg (hinv y)
+    have hi := inv_elim n (List.ofFn y) (by simp) gs (List.ofFn (insAt idx c y)) (initSt, []) hg (hinv y)
     have h2 := (hi.2 o).2
-    have h3 : (wiresFrom gs (List.ofFn (insAt idx false y))).getD o false =
-        F (insAt idx false y) := he (insAt idx false y)
+    have h3 : (wiresFrom gs (List.ofFn (insAt idx c y))).getD o false =
+        F (insAt idx c y) := he (insAt idx c y)
     exact h2.trans h3
   have hout_inr : ∃ o', res.1.getD o (Sum.inl false) = Sum.inr o' := by
     cases hst : res.1.getD o (Sum.inl false) with
@@ -968,12 +968,12 @@ theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (F : (Fin (n + 1) → Bool) �
     by_contra hnot
     have heq : binaryCost res.2 = binaryCost ([] : List Gate) + binaryCost gs := by omega
     have hag0 : AgreeNonConst initSt
-        (List.ofFn (insAt idx false y_diff)) (List.ofFn (insAt idx true y_diff)) := by
+        (List.ofFn (insAt idx c y_diff)) (List.ofFn (insAt idx (!c) y_diff)) := by
       refine ⟨by simp [initSt], by simp [initSt], ?_⟩
       intro i ⟨j, hj⟩
       by_cases hi : i < n + 1
       · rw [show initSt.getD i (Sum.inl false) = initFn ⟨i, hi⟩ from hgetFn initFn _ i hi] at hj
-        rw [hgetFn (insAt idx false y_diff) false i hi, hgetFn (insAt idx true y_diff) false i hi]
+        rw [hgetFn (insAt idx c y_diff) false i hi, hgetFn (insAt idx (!c) y_diff) false i hi]
         dsimp only [initFn, insAt] at hj ⊢
         by_cases h1 : i < idx.val
         · simp [h1]
@@ -983,14 +983,18 @@ theorem drop_one_var {n : ℕ} (idx : Fin (n + 1)) (F : (Fin (n + 1) → Bool) �
       · rw [List.getD_eq_default _ _ (by simp [initSt]; omega)] at hj
         cases hj
     have hag := elim_agree_of_eq_binCost n gs
-      (List.ofFn (insAt idx false y_diff)) (List.ofFn (insAt idx true y_diff))
+      (List.ofFn (insAt idx c y_diff)) (List.ofFn (insAt idx (!c) y_diff))
       (initSt, []) hg hag0 heq
     have hsame := hag.2.2 o ⟨o', ho'⟩
-    have hf0 : (wiresFrom gs (List.ofFn (insAt idx false y_diff))).getD o false =
-        F (insAt idx false y_diff) := he _
-    have hf1 : (wiresFrom gs (List.ofFn (insAt idx true y_diff))).getD o false =
-        F (insAt idx true y_diff) := he _
-    exact hdiff (hf0.symm.trans (hsame.trans hf1))
+    have hf0 : (wiresFrom gs (List.ofFn (insAt idx c y_diff))).getD o false =
+        F (insAt idx c y_diff) := he _
+    have hf1 : (wiresFrom gs (List.ofFn (insAt idx (!c) y_diff))).getD o false =
+        F (insAt idx (!c) y_diff) := he _
+    have hdiff' : F (insAt idx c y_diff) ≠ F (insAt idx (!c) y_diff) := by
+      cases c
+      · exact hdiff
+      · exact fun h => hdiff h.symm
+    exact hdiff' (hf0.symm.trans (hsame.trans hf1))
   refine ⟨res.2, o', elim_legal n gs (initSt, []) (by simp), hlt, ?_⟩
   intro y
   have h := heval y
@@ -1001,7 +1005,7 @@ def target (x : Fin 6 → Bool) : Bool :=
   Nat.testBit ({{HI}} * 2 ^ 32 + {{LO}}) (∑ i : Fin 6, if x i then 2 ^ (i : ℕ) else 0)
 
 set_option maxRecDepth 16000 in
-theorem restriction : ∀ y : Fin 5 → Bool, target (insAt ({{IDX}} : Fin 6) false y) = Signed.F5 y := by
+theorem restriction : ∀ y : Fin 5 → Bool, target (insAt ({{IDX}} : Fin 6) {{C}} y) = Signed.F5 y := by
   decide +kernel
 
 def witness : Circuit :=
@@ -1023,7 +1027,7 @@ theorem solve (s : ℕ) (h : HasCircuitSize 6 target s) :
       (List.length_filter_lt_length_iff_exists (p := isBinary)).mpr
         ⟨g, mem, by simp [isBinary, op]⟩
     obtain ⟨small, o', legal', lt, spec⟩ :=
-      drop_one_var ({{IDX}} : Fin 6) target
+      drop_one_var ({{IDX}} : Fin 6) {{C}} target
         (fun i => ({{YDIFF}} : ℕ).testBit i.val) (fun i => ({{Y0}} : ℕ).testBit i.val)
         (fun i => ({{Y1}} : ℕ).testBit i.val)
         (by decide +kernel) (by decide +kernel) gs o (fun g hg => fits g hg) computes

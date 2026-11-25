@@ -75,11 +75,11 @@ def evaluate(gates, x):
     return w[-1]
 
 
-def restrict(f, idx):
-    """Table of y -> f(insAt idx false y) on five inputs."""
+def restrict(f, idx, c=0):
+    """Table of y -> f(insAt idx c y) on five inputs."""
     t = 0
     for y in range(32):
-        x = (y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1))
+        x = (y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1)) | (c << idx)
         t |= f(x) << y
     return t
 
@@ -157,9 +157,9 @@ def main():
     t0 = time.time()
     # 1. The strongest kernel-checkable bound: for each input fixed to false, the largest B whose
     #    search rejects on some sample of 64 (true row, false row) pairs.
-    best = None  # (Bmax, idx, how, P, t5, ydiff, y0, y1)
-    for idx in range(6):
-        t5 = restrict(f, idx)
+    best = None  # (Bmax, idx, c, how, P, t5, ydiff, y0, y1)
+    for idx, c in [(i, c) for c in (0, 1) for i in range(6)]:
+        t5 = restrict(f, idx, c)
         if t5 in (0, (1 << 32) - 1):
             continue
         ydiff = next((y for y in range(32) if f((y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1)))
@@ -176,10 +176,10 @@ def main():
                 continue
             Bmax = largest_rejecting(W)
             if best is None or Bmax > best[0]:
-                best = (Bmax, idx, how, P, t5, ydiff, y0, y1)
+                best = (Bmax, idx, c, how, P, t5, ydiff, y0, y1)
     if best is None or best[0] < 0:
         die("no usable restriction")
-    Bmax, idx, how, P, t5, ydiff, y0, y1 = best
+    Bmax, idx, c, how, P, t5, ydiff, y0, y1 = best
     # 2. The smallest AND/OR witness, sizes upward: a size below the minimum must be exhausted (only
     #    the one just below costs anything), the minimum itself stops at the first circuit found.
     gates = None
@@ -202,14 +202,14 @@ def main():
     rows = "[" + ",\n   ".join("0x%032x" % w for w in W) + "]"
     for k, v in (("{{MOD}}", module), ("{{STMT}}", "(" + stmt + ")"), ("{{B}}", str(B)),
                  ("{{F5}}", str(t5)), ("{{ROWS5}}", rows), ("{{HI}}", str(hi)), ("{{LO}}", str(lo)),
-                 ("{{IDX}}", str(idx)), ("{{YDIFF}}", str(ydiff)), ("{{Y0}}", str(y0)),
+                 ("{{IDX}}", str(idx)), ("{{C}}", "true" if c else "false"), ("{{YDIFF}}", str(ydiff)), ("{{Y0}}", str(y0)),
                  ("{{Y1}}", str(y1)), ("{{WITNESS}}", lean_witness(gates)), ("{{M}}", str(m))):
         text = text.replace(k, v)
     assert "{{" not in text
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     open(out, "w", encoding="utf-8").write(text)
-    print("PROOF: %s m=%d B=%d (Bmax %d) idx=%d pairs=%s(%d) in %.0fs -> %s"
-          % (module, m, B, Bmax, idx, how, len(P), time.time() - t0, out))
+    print("PROOF: %s m=%d B=%d (Bmax %d) idx=%d:=%s pairs=%s(%d) in %.0fs -> %s"
+          % (module, m, B, Bmax, idx, "true" if c else "false", how, len(P), time.time() - t0, out))
 
 
 if __name__ == "__main__":

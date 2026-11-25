@@ -11,7 +11,7 @@ usage: race.py L-meta-N [--submit]
        runs `pnp.sh check`;
     5. only with --submit: `pnp.sh submit` (opens the pull request).
 It stops early when the twin is already proved or has a pull request waiting."""
-import json, os, re, subprocess, sys, time, urllib.parse, urllib.request
+import json, os, re, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
@@ -25,10 +25,13 @@ def pnp(*args):
 
 
 def state(gap):
-    q = urllib.parse.urlencode({"gap": gap})
-    with urllib.request.urlopen("https://pequalnp.com/desk/step?" + q, timeout=10) as r:
-        d = json.load(r)
+    # curl, like pnp.sh: the desk refuses Python's default client
+    r = subprocess.run(["curl", "--proto", "=https", "-fsS", "-m", "10", "-G", "https://pequalnp.com/desk/step",
+                        "--data-urlencode", "gap=" + gap], capture_output=True, text=True)
     time.sleep(2)
+    if r.returncode != 0:
+        return "unknown", None
+    d = json.loads(r.stdout)
     return d.get("state"), d.get("prs")
 
 
