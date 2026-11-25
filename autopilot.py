@@ -70,8 +70,27 @@ def main():
         gid, title = m.group(1), m.group(2)
         g = json.load(open(os.path.join(REPO, ".pnp", gid + ".json")))["gap"]
         t = re.search(r"Nat\.testBit \((\d+) \* 2 \^ 32 \+ (\d+)\)", g.get("statement", ""))
+        if t and g["statement"] == "¬ (" + STMT.format(hi=t.group(1), lo=t.group(2)) + ")":
+            # a 'False:' twin: race for its true twin while nobody has sent a pull request for it
+            log("%s: 'False:' twin; racing for its true twin" % gid)
+            r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "race.py"), gid], capture_output=True, text=True)
+            for line in r.stdout.strip().splitlines()[-4:]:
+                log("  race: " + line)
+            if r.returncode == 0:
+                pos = "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1)
+                if not a.submit:
+                    log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (pos, pos))
+                    return 0
+                code, out = pnp("submit", pos, timeout=600)
+                log("%s submit: %s" % (pos, out[-500:]))
+                subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+                time.sleep(a.interval); continue
+            for h in held():
+                if h == gid or h == "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1):
+                    release(h, "other")
+            time.sleep(a.interval); continue
         if not (t and g["statement"] == STMT.format(hi=t.group(1), lo=t.group(2))):
-            log("%s is not a direction-3 positive claim: %s" % (gid, title[:90]))
+            log("%s is not a direction-3 claim: %s" % (gid, title[:90]))
             release(gid, "other")
             time.sleep(a.interval); continue
         log("%s: direction-3 positive claim, table %s %s; generating" % (gid, t.group(1), t.group(2)))

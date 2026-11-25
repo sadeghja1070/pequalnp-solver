@@ -63,6 +63,7 @@ def main():
     sk = os.path.join(REPO, g["file"])
     if os.path.exists(sk):
         os.remove(sk)
+    os.rename(os.path.join(REPO, ".pnp", neg + ".json"), os.path.join(REPO, ".pnp", neg + ".done"))
     # 4. lease the twin with a proof in hand; regenerate from the official statement; check
     code, out = pnp("next", "--proof-of", pos)
     if code != 0 or not os.path.exists(os.path.join(REPO, ".pnp", pos + ".json")):
