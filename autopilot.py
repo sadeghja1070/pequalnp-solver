@@ -49,6 +49,12 @@ def release(gid, reason):
     log("released %s (%s)" % (gid, reason))
 
 
+def mark_done(gid):
+    src = os.path.join(REPO, ".pnp", gid + ".json")
+    if os.path.exists(src):
+        os.rename(src, os.path.join(REPO, ".pnp", gid + ".done"))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=45)
@@ -84,7 +90,10 @@ def main():
                 code, out = pnp("submit", pos, timeout=600)
                 log("%s submit: %s" % (pos, out[-500:]))
                 subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+                mark_done(pos)
                 time.sleep(a.interval); continue
+            if r.returncode == 3:
+                release(gid, "statement_seems_false")  # its true twin is ours, checked by Lean
             for h in held():
                 if h == gid or h == "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1):
                     release(h, "other")
@@ -116,6 +125,7 @@ def main():
         code, out = pnp("submit", gid, timeout=600)
         log("%s submit: %s" % (gid, out[-500:]))
         subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+        mark_done(gid)
         time.sleep(a.interval)
     log("time limit reached")
     return 0

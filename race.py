@@ -46,6 +46,13 @@ def main():
     if not (g["statement"].startswith("¬ (∀ s : ℕ, PEqualNP.MetaComplexity.HasCircuitSize 6") and t):
         sys.exit("%s is not a 'False:' direction-3 step" % neg)
     hi, lo = t.group(1), t.group(2)
+    # Already ours (submitted, or held): the desk may not show our pull request yet, so look locally.
+    mine = (subprocess.run(["git", "rev-parse", "--verify", "-q", "refs/heads/" + pos], cwd=REPO,
+                           capture_output=True).returncode == 0
+            or any(os.path.exists(os.path.join(REPO, ".pnp", pos + ext)) for ext in (".json", ".done")))
+    if mine:
+        print("STOP: %s is already ours (submitted or held); nothing to race for." % pos)
+        return 3
     st, prs = state(pos)
     print("twin %s: %s %s" % (pos, st, prs or ""))
     if st not in ("open", "leased"):
