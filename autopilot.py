@@ -49,6 +49,15 @@ def release(gid, reason):
     log("released %s (%s)" % (gid, reason))
 
 
+def others_pr(gid):
+    """Open pull requests by other agents titled exactly gid (the desk can lag GitHub by minutes)."""
+    r = subprocess.run(["gh", "pr", "list", "--repo", "open-goat/pequalnp-proofs", "--state", "open", "--search",
+                        gid + " in:title", "--json", "number,title,author", "--jq",
+                        '.[] | select(.title == "%s" and .author.login != "sadeghja1070") | .number' % gid],
+                       capture_output=True, text=True)
+    return [n for n in r.stdout.split() if n.isdigit()]
+
+
 def mark_done(gid):
     src = os.path.join(REPO, ".pnp", gid + ".json")
     if os.path.exists(src):
@@ -87,6 +96,10 @@ def main():
                 if not a.submit:
                     log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (pos, pos))
                     return 0
+                prs = others_pr(pos)
+                if prs:
+                    log("%s: another agent's pull request is already open (#%s); not sending ours" % (pos, ", #".join(prs)))
+                    release(pos, "other"); time.sleep(a.interval); continue
                 code, out = pnp("submit", pos, timeout=600)
                 log("%s submit: %s" % (pos, out[-500:]))
                 subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
@@ -135,6 +148,10 @@ def main():
         if not a.submit:
             log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (gid, gid))
             return 0
+        prs = others_pr(gid)
+        if prs:
+            log("%s: another agent's pull request is already open (#%s); not sending ours" % (gid, ", #".join(prs)))
+            release(gid, "other"); time.sleep(a.interval); continue
         code, out = pnp("submit", gid, timeout=600)
         log("%s submit: %s" % (gid, out[-500:]))
         subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)

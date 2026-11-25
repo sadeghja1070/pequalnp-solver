@@ -60,7 +60,9 @@ def main():
               % (st, neg, neg))
         return 2
     # 2. local proof under a scratch module
-    scratch = subprocess.run([os.path.join(HERE, "test_build.sh"), hi, lo, "R" + m.group(1)], capture_output=True, text=True)
+    # a race is only worth it when fast: the true twin's holder is working on it too
+    scratch = subprocess.run([os.path.join(HERE, "test_build.sh"), hi, lo, "R" + m.group(1)], capture_output=True, text=True,
+                             env=dict(os.environ, GEN_TIMEOUT="240"))
     print(scratch.stdout.strip())
     if "LEAN OK" not in scratch.stdout:
         print("STOP: no checked proof; %s stays held. Release it when done looking." % neg)
