@@ -77,12 +77,22 @@ def main():
         print(out)
         print("STOP: the desk did not lease %s" % pos)
         return 1
-    gen = subprocess.run([sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json",
-                          os.path.join(REPO, ".pnp", pos + ".json")], capture_output=True, text=True)
-    print(gen.stdout.strip() or gen.stderr.strip())
-    if not gen.stdout.startswith("PROOF"):
-        print("STOP: could not generate from the official statement; release %s if it stays that way" % pos)
-        return 1
+    sys.path.insert(0, HERE)
+    from gen_dir3 import STMT
+    official = json.load(open(os.path.join(REPO, ".pnp", pos + ".json")))["gap"]
+    built = os.path.join(HERE, "out", "L_meta_scratch_R%s.lean" % m.group(1))
+    if official["statement"] == STMT.format(hi=hi, lo=lo) and os.path.exists(built):
+        # the proof already built under the scratch name, renamed: no second witness search
+        text = open(built, encoding="utf-8").read().replace("L_meta_scratch_R%s" % m.group(1), official["module"].split(".")[-1])
+        open(os.path.join(REPO, official["file"]), "w", encoding="utf-8").write(text)
+        print("reused the checked scratch proof for %s" % pos)
+    else:
+        gen = subprocess.run([sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json",
+                              os.path.join(REPO, ".pnp", pos + ".json")], capture_output=True, text=True)
+        print(gen.stdout.strip() or gen.stderr.strip())
+        if not gen.stdout.startswith("PROOF"):
+            print("STOP: could not generate from the official statement; release %s if it stays that way" % pos)
+            return 1
     code, out = pnp("check", pos)
     if code != 0:
         print(out[-3000:])
