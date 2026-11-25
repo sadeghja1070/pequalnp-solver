@@ -19,7 +19,7 @@
     <string>--submit</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>@SOLVER@</string>
+  <string>@HOME@</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -37,8 +37,8 @@
   <key>Nice</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
-  <string>@SOLVER@/out/autopilot.log</string>
+  <string>@HOME@/Library/Logs/pnp-autopilot.log</string>
   <key>StandardErrorPath</key>
-  <string>@SOLVER@/out/autopilot.log</string>
+  <string>@HOME@/Library/Logs/pnp-autopilot.log</string>
 </dict>
 </plist>

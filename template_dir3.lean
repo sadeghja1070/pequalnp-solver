@@ -547,6 +547,7 @@ theorem bound_from_search (inputs : List W) (width : inputs.length = 5)
 def rows5 : List W :=
   {{ROWS5}}
 
+set_option maxHeartbeats 2000000 in
 set_option maxRecDepth 32000 in
 theorem reject5 : search {{B}} rows5 = false := by
   decide +kernel

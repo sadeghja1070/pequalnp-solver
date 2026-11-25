@@ -133,7 +133,7 @@ def main():
     ap.add_argument("--module")
     ap.add_argument("--out")
     ap.add_argument("--timeout", type=float, default=900, help="seconds for the first witness search")
-    ap.add_argument("--max-b", type=int, default=6, help="largest kernel bound to use (B=7 needs a longer Lean check)")
+    ap.add_argument("--max-b", type=int, default=7, help="largest kernel bound to use (B=7: about 3.5 min of Lean check)")
     a = ap.parse_args()
     args_timeout = a.timeout
     if a.json:

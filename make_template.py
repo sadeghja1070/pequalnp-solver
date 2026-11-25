@@ -74,6 +74,10 @@ for old, new, cnt in (
 t = t[:a] + blk + t[b:]
 sub("insAt ({{IDX}} : Fin 6) false y", "insAt ({{IDX}} : Fin 6) {{C}} y", 1)
 sub("drop_one_var ({{IDX}} : Fin 6) target", "drop_one_var ({{IDX}} : Fin 6) {{C}} target", 1)
+# The kernel search at B = 7 (10-gate witnesses) needs a little more than Lean's default work limit
+# (203 s measured for L-meta-16443's function); 10x the default leaves headroom. Allowed by the
+# project's format rules: a maxHeartbeats option directly above one declaration.
+sub("set_option maxRecDepth 32000 in\ntheorem reject5", "set_option maxHeartbeats 2000000 in\nset_option maxRecDepth 32000 in\ntheorem reject5", 1)
 for k in ("{{MOD}}", "{{STMT}}", "{{B}}", "{{F5}}", "{{ROWS5}}", "{{HI}}", "{{LO}}", "{{IDX}}", "{{YDIFF}}",
           "{{Y0}}", "{{Y1}}", "{{WITNESS}}", "{{M}}", "{{C}}"):
     assert k in t, k
