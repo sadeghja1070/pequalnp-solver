@@ -64,6 +64,21 @@ def mark_done(gid):
         os.rename(src, os.path.join(REPO, ".pnp", gid + ".done"))
 
 
+def recover():
+    """Undo what a crash or a kill can leave behind: another branch checked out, a lease held, an
+    untracked proof file in the fork. Only untracked files under Outside/ are ever deleted."""
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+    for gid in held():
+        log("recovering: handing back %s" % gid)
+        release(gid, "other")
+    st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO, capture_output=True, text=True)
+    for line in st.stdout.splitlines():
+        path = line[3:]
+        if line.startswith("?? ") and re.fullmatch(r"lean/PEqualNP/Outside/L_meta_(\d+|scratch_\w+)\.lean", path):
+            log("recovering: removing untracked %s" % path)
+            os.remove(os.path.join(REPO, path))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=45)
@@ -71,14 +86,16 @@ def main():
     ap.add_argument("--submit", action="store_true")
     a = ap.parse_args()
     stop_at = time.time() + a.max_hours * 3600
+    recover()
     if clean_tree():
-        sys.exit("the fork has changes; clean it first: %s" % clean_tree())
-    before = set(held())
+        sys.exit("the fork has changes that are not ours to remove: %s" % clean_tree())
     while time.time() < stop_at:
+        if os.path.exists(os.path.join(HERE, "PAUSE")):
+            time.sleep(60); continue  # remove solver/PAUSE to resume
         code, out = pnp("next", "--level", "solid", "--kind", "prove", timeout=120)
         m = re.search(r"^STEP\s+(L-[a-z]+-\d+) - (.*)$", out, re.M)
         if code == 120:
-            log("STOP notice from the project: " + out.splitlines()[-1]); return 3
+            log("STOP notice from the project: " + out.splitlines()[-1]); return 0  # 0: do not restart
         if not m:
             log("no step: " + (out.splitlines()[-1] if out else str(code)))
             time.sleep(a.interval); continue

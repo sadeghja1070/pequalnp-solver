@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs the pequalnp.com autopilot whenever you are logged in. Installed by launchd/install.sh.
+     It restarts after a crash (non-zero exit), at most once per 5 minutes, and stays stopped after a
+     clean exit (a STOP notice from the project). Pause: touch solver/PAUSE. Remove: launchd/uninstall.sh -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.pnp-autopilot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-I</string>
+    <string>@SOLVER@/autopilot.py</string>
+    <string>--interval</string>
+    <string>20</string>
+    <string>--max-hours</string>
+    <string>100000</string>
+    <string>--submit</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@SOLVER@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>@SOLVER@/out/autopilot.log</string>
+  <key>StandardErrorPath</key>
+  <string>@SOLVER@/out/autopilot.log</string>
+</dict>
+</plist>
