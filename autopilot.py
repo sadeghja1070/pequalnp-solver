@@ -74,7 +74,7 @@ def recover():
     st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO, capture_output=True, text=True)
     for line in st.stdout.splitlines():
         path = line[3:]
-        if line.startswith("?? ") and re.fullmatch(r"lean/PEqualNP/Outside/L_meta_(\d+|scratch_\w+)\.lean", path):
+        if line.startswith("?? ") and re.fullmatch(r"lean/PEqualNP/Outside/L_meta_(\d+|scratch_R\d+)\.lean", path):
             log("recovering: removing untracked %s" % path)
             os.remove(os.path.join(REPO, path))
 
