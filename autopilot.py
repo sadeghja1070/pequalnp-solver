@@ -10,7 +10,7 @@ usage: autopilot.py [--interval 45] [--max-hours 3] [--submit]
     desk from offering it to us again for an hour.
   The desk asks for one request every few seconds at most; rounds are --interval seconds apart.
 Log lines go to stdout; a READY line names a checked step waiting for its pull request."""
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
@@ -106,9 +106,19 @@ def main():
             release(gid, "other")
             time.sleep(a.interval); continue
         log("%s: direction-3 positive claim, table %s %s; generating" % (gid, t.group(1), t.group(2)))
+        # keep the lease alive while the witness search runs (it can take ~10 minutes at 10 gates)
+        stop_beats = threading.Event()
+
+        def beats():
+            while not stop_beats.wait(240):
+                c, o = pnp("beat", gid)
+                if "STOP" in o:
+                    log("%s: desk says stop: %s" % (gid, o.splitlines()[-1])); return
+        threading.Thread(target=beats, daemon=True).start()
         gen = subprocess.run([sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json",
-                              os.path.join(REPO, ".pnp", gid + ".json"), "--timeout", "240"],
+                              os.path.join(REPO, ".pnp", gid + ".json"), "--timeout", "1200"],
                              capture_output=True, text=True)
+        stop_beats.set()
         log((gen.stdout.strip() or gen.stderr.strip()[-300:]).splitlines()[-1])
         if not gen.stdout.startswith("PROOF"):
             release(gid, "other")
