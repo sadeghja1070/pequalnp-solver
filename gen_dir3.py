@@ -133,6 +133,7 @@ def main():
     ap.add_argument("--module")
     ap.add_argument("--out")
     ap.add_argument("--timeout", type=float, default=900, help="seconds for the first witness search")
+    ap.add_argument("--max-b", type=int, default=6, help="largest kernel bound to use (B=7 needs a longer Lean check)")
     a = ap.parse_args()
     args_timeout = a.timeout
     if a.json:
@@ -180,6 +181,7 @@ def main():
     if best is None or best[0] < 0:
         die("no usable restriction")
     Bmax, idx, c, how, P, t5, ydiff, y0, y1 = best
+    Bmax = min(Bmax, a.max_b)
     # 2. The smallest AND/OR witness, sizes upward: a size below the minimum must be exhausted (only
     #    the one just below costs anything), the minimum itself stops at the first circuit found.
     gates = None
