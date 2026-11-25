@@ -1,8 +1,10 @@
 #!/bin/sh
-# test_build.sh HI LO TAG : generate a proof for the table under module L_meta_9990<TAG>, build it with Lean, delete it.
+# test_build.sh HI LO TAG : generate a proof for the table under module L_meta_scratch_<TAG>, build it with Lean, delete it.
 set -e
 here=$(cd "$(dirname "$0")" && pwd); repo="$here/../pequalnp-proofs"
-mod="L_meta_9990$3"; out="$repo/lean/PEqualNP/Outside/$mod.lean"
+mod="L_meta_scratch_$3"; out="$repo/lean/PEqualNP/Outside/$mod.lean"
+# never touch a file the repository tracks
+if (cd "$repo" && git ls-files --error-unmatch "lean/PEqualNP/Outside/$mod.lean" >/dev/null 2>&1); then echo "refusing: $mod is tracked"; exit 1; fi
 python3 -I "$here/gen_dir3.py" --table "$1" "$2" --module "$mod" --out "$out" || exit 1
 cd "$repo/lean"
 start=$(date +%s)

@@ -36,7 +36,7 @@ def find_witness(hi, lo, s, timeout, cores=12):
     exe = os.path.join(HERE, "minckt")
     if not os.path.exists(exe) or os.path.getmtime(exe) < os.path.getmtime(exe + ".c"):
         subprocess.run(["cc", "-O3", "-march=native", "-o", exe, exe + ".c"], check=True)
-    procs = [subprocess.Popen([exe, "0", str(s), str(cores), str(p), str(hi), str(lo)], stdout=subprocess.PIPE, text=True)
+    procs = [subprocess.Popen([exe, "0", str(s), str(cores), str(p), str(hi), str(lo), str(p + 1)], stdout=subprocess.PIPE, text=True)
              for p in range(cores)]
     found, start = None, time.time()
     try:
@@ -53,9 +53,9 @@ def find_witness(hi, lo, s, timeout, cores=12):
         for p in procs:
             p.kill()
     if not found:
-        return None
+        return None, not procs  # exhausted: every part finished without a circuit
     return [(m.group(2), int(m.group(3)), int(m.group(4)))
-            for m in re.finditer(r"w(\d+)=(and|or)\(w(\d+),w(\d+)\)", found)]
+            for m in re.finditer(r"w(\d+)=(and|or)\(w(\d+),w(\d+)\)", found)], False
 
 
 def largest_rejecting(W, cap=9):
@@ -180,16 +180,18 @@ def main():
     if best is None or best[0] < 0:
         die("no usable restriction")
     Bmax, idx, how, P, t5, ydiff, y0, y1 = best
-    # 2. An AND/OR witness with at most Bmax + 3 gates: largest size first (found fastest), then
-    #    smaller while each try finishes quickly; a smaller witness means a smaller B, a faster check.
+    # 2. The smallest AND/OR witness, sizes upward: a size below the minimum must be exhausted (only
+    #    the one just below costs anything), the minimum itself stops at the first circuit found.
     gates = None
-    for s in range(Bmax + 3, 0, -1):
-        g = find_witness(hi, lo, s, timeout=args_timeout if gates is None else 60)
-        if g is None:
+    for s in range(1, Bmax + 4):
+        g, exhausted = find_witness(hi, lo, s, timeout=args_timeout)
+        if g is not None:
+            gates = g
             break
-        gates = g
+        if not exhausted:
+            die("witness search at size %d timed out after %.0fs" % (s, args_timeout))
     if gates is None:
-        die("no AND/OR circuit with %d gates found (kernel bound allows at most %d)" % (Bmax + 3, Bmax + 3))
+        die("every AND/OR circuit needs more than %d gates, beyond the kernel bound (B at most %d)" % (Bmax + 3, Bmax))
     if not all(evaluate(gates, x) == f(x) for x in range(64)):
         die("witness check failed (search bug)")
     m = len(gates)

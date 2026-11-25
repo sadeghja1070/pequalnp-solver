@@ -3,7 +3,8 @@
 // Canonical form: gates in greedy-min-key topological order, so each gate either reads the
 // previous gate or has a larger key than it. Minimal circuits never repeat a value, never make
 // a constant, and use every gate and every essential input; the output is the last gate.
-// usage: minckt MODE S P ID      (process ID of P handles first-gate choices idx % P == ID)
+// usage: minckt MODE S P ID HI LO [SEED]  (process ID of P handles first-gate choices idx % P == ID;
+//        SEED > 0 rotates the branch order randomly, still exhaustive)
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -13,6 +14,8 @@ static int S, MODE, P, ID;
 static u64 F;
 static u64 val[64]; static int uses[64], gop[64], ga[64], gb[64];
 static int unused; static long long nodes; static long long firstIdx;
+static u64 SEED, RS; static int PA[2048], PB[2048];
+static u64 rnd(void) { RS ^= RS << 13; RS ^= RS >> 7; RS ^= RS << 17; return RS; }
 
 static void print_circuit(int m) {
   printf("FOUND mode=%d size=%d:", MODE, S);
@@ -60,12 +63,17 @@ static int try_gate(int m, int op, int i, int j, u64 v, int prevkey) {
   int save = unused; unused = nu;
   int ok = 0;
   int m2 = m + 1;
-  for (int a = 0; a < m2 && !ok; a++) {
-    for (int b = a + 1; b < m2 && !ok; b++) {
-      ok = try_gate(m2, 0, a, b, val[a] & val[b], key) || try_gate(m2, 1, a, b, val[a] | val[b], key);
-    }
-    if (!ok && MODE == 1) ok = try_gate(m2, 2, a, 0, ~val[a], key);
+  // Every pair (a < b) once, in an order rotated by a random offset when SEED is set: the search
+  // stays exhaustive, only the order changes, so different workers find a circuit sooner.
+  int npair = m2 * (m2 - 1) / 2;
+  int off = SEED ? (int)(rnd() % (u64)npair) : 0, flip = SEED ? (int)(rnd() & 1) : 0;
+  for (int t = 0; t < npair && !ok; t++) {
+    int p = (t + off) % npair, a = PA[p], b = PB[p];
+    u64 v0 = val[a] & val[b], v1 = val[a] | val[b];
+    ok = flip ? (try_gate(m2, 1, a, b, v1, key) || try_gate(m2, 0, a, b, v0, key))
+              : (try_gate(m2, 0, a, b, v0, key) || try_gate(m2, 1, a, b, v1, key));
   }
+  for (int a = 0; a < m2 && !ok && MODE == 1; a++) ok = try_gate(m2, 2, a, 0, ~val[a], key);
   unused = save; uses[i]--; if (op != 2) uses[j]--;
   return ok;
 }
@@ -73,6 +81,8 @@ static int try_gate(int m, int op, int i, int j, u64 v, int prevkey) {
 int main(int argc, char **argv) {
   MODE = atoi(argv[1]); S = atoi(argv[2]); P = atoi(argv[3]); ID = atoi(argv[4]);
   F = strtoull(argv[5], 0, 10) * 4294967296ULL + strtoull(argv[6], 0, 10);
+  SEED = argc > 7 ? strtoull(argv[7], 0, 10) : 0; RS = SEED * 2654435761ULL + ID + 1;
+  for (int b = 1, p = 0; b < 64 && p < 2048; b++) for (int a = 0; a < b && p < 2048; a++, p++) { PA[p] = a; PB[p] = b; }
   for (int i = 0; i < N; i++) { u64 x = 0; for (int r = 0; r < 64; r++) if (r >> i & 1) x |= 1ULL << r; val[i] = x; uses[i] = 0; }
   unused = 0;
   for (int i = 0; i < N; i++) { int ess = 0; for (int r = 0; r < 64; r++) if ((F >> r & 1) != (F >> (r ^ (1 << i)) & 1)) ess = 1; if (ess) unused++; else uses[i] = 1; }
