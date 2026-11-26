@@ -40,6 +40,15 @@ statement's own conditions; the Lean proof is the circuit, `simp` for the gate k
 for the rest (the kernel for the truth table). UNSAT at every size means no such circuit with
 binary gates on two different wires, so the step is handed back as `statement_seems_false`.
 
+## Ahead of the desk
+
+The desk hands a step to whoever asks first, and the 'False:' twin of a claim only reaches us
+after someone else has taken the claim. So the autopilot also reads the site's public export
+for new open steps, asks the desk which are live, proves the ones a generator here fits in a
+background pool, and leases each proven step with `pnp.sh next --proof-of` (allowed for a step
+you hold a checked proof of), then checks and submits it: at most one pull request every
+`--submit-gap` seconds (300), after checking that nobody has opened one for it.
+
 ## Files
 
 | File | Role |
@@ -52,6 +61,9 @@ binary gates on two different wires, so the step is handed back as `statement_se
 | `race.py` | For a held "False:" twin L-meta-N: prove L-meta-(N-1), lease it with `--proof-of`, check it |
 | `gen_find.py` | Find steps: lease JSON (or kind, n, k, table) to Lean file, by SAT |
 | `build_scratch.sh` | Guard-check and `lake build` a generated `out/L_meta_scratch_*.lean` in the fork, then remove it |
+| `scan.py` | Lists open steps from the site's public data export (data.pequalnp.com), caching each step's file |
+| `gen_circ.py` | Circuit steps whose proof is a computation: explicit circuits (decide), or 'there is a circuit' with the function read from the statement (SAT) |
+| `harvest.py` | Every 5 minutes: new open steps from the export, desk state of each, proofs of the live ones in a pool (Lean via `lake env lean`, outside the fork) |
 | `autopilot.py` | Takes solid prove steps, runs the generator that fits, checks, submits; stops a generator when the desk withdraws its step |
 | `launchd/` | Runs the autopilot as a launchd agent (`install.sh`, `uninstall.sh`; pause with `touch PAUSE`) |
 
