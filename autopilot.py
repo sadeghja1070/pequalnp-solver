@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Ask the desk for solid prove steps until one is a direction-3 claim we can prove, then prove it.
+"""Ask the desk for solid prove steps until one is a step this solver proves, then prove it.
 
 usage: autopilot.py [--interval 45] [--max-hours 3] [--submit]
   Each round: `pnp.sh next --level solid --kind prove` (one lease at a time).
   - a direction-3 positive claim: generate the proof from the lease (gen_dir3.py --json), renew the
     lease, `pnp.sh check`. Without --submit it stops there with the step checked and held; with
     --submit it runs `pnp.sh submit` and goes on.
-  - anything else (the 'False:' twins, other families): handed back as `other`, which also keeps the
-    desk from offering it to us again for an hour.
+  - a 'find' step (templates obja-midnot-9c, tie6-find, tie5-find3: a small circuit using NOT):
+    gen_find.py --json, then the same check and submit. A SAT answer of "no such circuit" hands it
+    back as statement_seems_false, a timeout as out_of_time.
+  - a direction-3 'False:' twin: race for its true twin (race.py).
+  - anything else: handed back as `other`, which also keeps the desk from offering it to us again
+    for an hour.
+  While a generator runs the lease is renewed every 4 minutes; when the desk withdraws the step,
+  the generator and its solver processes are stopped at once.
   The desk asks for one request every few seconds at most; rounds are --interval seconds apart.
 Log lines go to stdout; a READY line names a checked step waiting for its pull request."""
-import argparse, json, os, re, subprocess, sys, threading, time
+import argparse, json, os, re, signal, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
 from gen_dir3 import STMT  # noqa: E402
+import gen_find  # noqa: E402
+
+BEAT = 240  # seconds between lease renewals while a generator runs
 
 
 def log(msg):
@@ -62,6 +71,45 @@ def mark_done(gid):
     src = os.path.join(REPO, ".pnp", gid + ".json")
     if os.path.exists(src):
         os.rename(src, os.path.join(REPO, ".pnp", gid + ".done"))
+
+
+def kind_of(g):
+    """'dir3' for a direction-3 positive claim, 'find' for a find step gen_find.py proves, else None."""
+    st = g.get("statement", "")
+    t = re.search(r"Nat\.testBit \((\d+) \* 2 \^ 32 \+ (\d+)\)", st)
+    if t and st == STMT.format(hi=t.group(1), lo=t.group(2)):
+        return "dir3"
+    kind = gen_find.TEMPLATES.get((g.get("faithful_by_template") or {}).get("template"))
+    if kind:
+        try:
+            if gen_find.statement(kind, *gen_find.parse(kind, st)) == st:
+                return "find"
+        except (AttributeError, ValueError):
+            pass
+    return None
+
+
+def generate(gid, cmd):
+    """Run a generator, renewing the lease while it works; if the desk withdraws the step, stop the
+    generator and every process it started. Returns (stdout, stderr, withdrawn)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    done, withdrawn = threading.Event(), threading.Event()
+
+    def beats():
+        while not done.wait(BEAT):
+            c, o = pnp("beat", gid)
+            if "STOP" in o:
+                log("%s: desk says stop: %s" % (gid, o.splitlines()[-1]))
+                withdrawn.set()
+                try:
+                    os.killpg(p.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                return
+    threading.Thread(target=beats, daemon=True).start()
+    out, err = p.communicate()
+    done.set()
+    return out, err, withdrawn.is_set()
 
 
 def recover():
@@ -131,27 +179,28 @@ def main():
                 if h == gid or h == "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1):
                     release(h, "other")
             time.sleep(a.interval); continue
-        if not (t and g["statement"] == STMT.format(hi=t.group(1), lo=t.group(2))):
-            log("%s is not a direction-3 claim: %s" % (gid, title[:90]))
+        kind = kind_of(g)
+        if kind is None:
+            log("%s is not a step this solver proves: %s" % (gid, title[:90]))
             release(gid, "other")
             time.sleep(a.interval); continue
-        log("%s: direction-3 positive claim, table %s %s; generating" % (gid, t.group(1), t.group(2)))
-        # keep the lease alive while the witness search runs (it can take ~10 minutes at 10 gates)
-        stop_beats = threading.Event()
-
-        def beats():
-            while not stop_beats.wait(240):
-                c, o = pnp("beat", gid)
-                if "STOP" in o:
-                    log("%s: desk says stop: %s" % (gid, o.splitlines()[-1])); return
-        threading.Thread(target=beats, daemon=True).start()
-        gen = subprocess.run([sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json",
-                              os.path.join(REPO, ".pnp", gid + ".json"), "--timeout", "1200"],
-                             capture_output=True, text=True)
-        stop_beats.set()
-        log((gen.stdout.strip() or gen.stderr.strip()[-300:]).splitlines()[-1])
-        if not gen.stdout.startswith("PROOF"):
+        lease = os.path.join(REPO, ".pnp", gid + ".json")
+        if kind == "dir3":
+            log("%s: direction-3 positive claim, table %s %s; generating" % (gid, t.group(1), t.group(2)))
+            cmd = [sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json", lease, "--timeout", "1200"]
+        else:
+            log("%s: find step (%s); searching" % (gid, title[:90]))
+            cmd = [sys.executable, "-I", os.path.join(HERE, "gen_find.py"), "--json", lease, "--timeout", "1500"]
+        gout, gerr, withdrawn = generate(gid, cmd)
+        if withdrawn:
             release(gid, "other")
+            time.sleep(a.interval); continue
+        log((gout.strip() or gerr.strip()[-300:] or "generator gave no output").splitlines()[-1])
+        if not gout.startswith("PROOF"):
+            reason = "other"
+            if kind == "find":
+                reason = "statement_seems_false" if "UNSAT at every size" in gout else "out_of_time"
+            release(gid, reason)
             time.sleep(a.interval); continue
         code, out = pnp("beat", gid)
         if "STOP" in out:
