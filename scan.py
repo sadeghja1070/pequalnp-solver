@@ -58,16 +58,26 @@ def open_steps(program="meta", status="j"):
     return [("L-%s-%d" % (program, n[0]), n[3]) for n in nodes if n[1] == status]
 
 
-def scan(workers=4):
+def programs():
+    """The keys of every program in the export (meta, gct, clb, pcx, lib, alg, ...)."""
+    head = fetch("head.json")
+    return [p["key"] for p in fetch(head["files"]["map"])["programs"]]
+
+
+def scan(workers=4, programs=("meta",)):
     os.makedirs(CACHE, exist_ok=True)
-    steps = open_steps()
+    steps = [s for p in programs for s in open_steps(p)]
 
     def one(s):
         gid, ref = s
-        try:
-            d = fetch("data/lemma/%s.%s.json" % (gid, ref), os.path.join(CACHE, "%s.%s.json" % (gid, ref)))
-        except (IOError, ValueError) as e:
-            return gid, None, str(e)
+        for attempt in range(3):  # the export's server drops a connection now and then
+            try:
+                d = fetch("data/lemma/%s.%s.json" % (gid, ref), os.path.join(CACHE, "%s.%s.json" % (gid, ref)))
+                break
+            except (IOError, ValueError) as e:
+                if attempt == 2:
+                    return gid, None, ""
+                time.sleep(2)
         st = d.get("formal_statement") or ""
         return gid, kind_of_statement(st), st
     with ThreadPoolExecutor(workers) as ex:

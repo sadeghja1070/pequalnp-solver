@@ -16,7 +16,7 @@ make it skip the step.
 usage: gen_circ.py --id L-meta-N --statement-file F [--out FILE] [--timeout S]
        gen_circ.py --json <.pnp/L-meta-N.json> [--out FILE]
 Prints one verdict line (PROOF / NO PROOF / SKIP)."""
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, subprocess, sys, time, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -305,7 +305,7 @@ def solve(n, s, rows, opts, timeout, tag):
     try:
         for sym in (False, True):
             nv, cls, decode = encode(n, s, rows, sym=sym, **opts)
-            path = os.path.join(HERE, "out", "circ_%s_%d_%d.cnf" % (tag, s, sym))
+            path = os.path.join(HERE, "out", "circ_%s_%d_%d_%d_%d.cnf" % (tag, s, sym, os.getpid(), threading.get_ident()))
             with open(path, "w") as f:
                 f.write("p cnf %d %d\n" % (nv, len(cls)))
                 f.writelines(" ".join(map(str, c)) + " 0\n" for c in cls)

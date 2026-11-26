@@ -63,8 +63,9 @@ you hold a checked proof of), then checks and submits it: at most one pull reque
 | `build_scratch.sh` | Guard-check and `lake build` a generated `out/L_meta_scratch_*.lean` in the fork, then remove it |
 | `scan.py` | Lists open steps from the site's public data export (data.pequalnp.com), caching each step's file |
 | `gen_circ.py` | Circuit steps whose proof is a computation: explicit circuits (decide), or 'there is a circuit' with the function read from the statement (SAT) |
-| `harvest.py` | Every 5 minutes: new open steps from the export, desk state of each, proofs of the live ones in a pool (Lean via `lake env lean`, outside the fork) |
-| `autopilot.py` | Takes solid prove steps, runs the generator that fits, checks, submits; stops a generator when the desk withdraws its step |
+| `battery.py` | Any statement: a battery of standard tactics (ring, norm_num, simp, omega, nlinarith, decide, ...), each in its own copy of the theorem, in one Lean run |
+| `harvest.py` | Every 5 minutes: new open steps of every program from the export, desk state of each, proofs of the live ones in a pool (Lean via `lake env lean`, outside the fork); outside meta, the battery |
+| `autopilot.py` | Takes solid prove steps and works up to 4 at once (`--slots`): each step's generator (or the battery, `--battery-slots`) runs in its own slot; next, check, submit and release run one at a time under one lock; leases are renewed straight at the desk |
 | `launchd/` | Runs the autopilot as a launchd agent (`install.sh`, `uninstall.sh`; pause with `touch PAUSE`) |
 
 ## Use

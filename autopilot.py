@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Ask the desk for solid prove steps until one is a step this solver proves, then prove it.
+"""Ask the desk for solid prove steps and prove the ones this solver reads, several at once.
 
-usage: autopilot.py [--interval 45] [--max-hours 3] [--submit]
-  Each round: `pnp.sh next --level solid --kind prove` (one lease at a time).
+usage: autopilot.py [--interval 45] [--max-hours 3] [--submit] [--slots 4] [--battery-slots 2]
+  Each round: `pnp.sh next --level solid --kind prove` (with --another while steps are held; the desk
+  allows five at a time). A step a generator reads goes to a slot: its generator runs there, in
+  parallel with the other slots, and writes the proof outside the fork. Everything that touches the
+  fork's tree or git state (next, check, submit, release) runs one at a time under one lock; lease
+  renewals go straight to the desk (POST /desk/beat), not through pnp.sh, whose beat would also
+  rewrite FETCH_HEAD under a submit running in another slot.
   - a direction-3 positive claim: generate the proof from the lease (gen_dir3.py --json), renew the
     lease, `pnp.sh check`. Without --submit it stops there with the step checked and held; with
     --submit it runs `pnp.sh submit` and goes on.
@@ -10,22 +15,29 @@ usage: autopilot.py [--interval 45] [--max-hours 3] [--submit]
     gen_find.py --json, then the same check and submit. A SAT answer of "no such circuit" hands it
     back as statement_seems_false, a timeout as out_of_time.
   - a direction-3 'False:' twin: race for its true twin (race.py).
-  - anything else: handed back as `other`, which also keeps the desk from offering it to us again
-    for an hour.
+  - anything else: a battery of standard tactics (battery.py) in at most --battery-slots slots at
+    once; if none closes it, or those slots are busy, it is handed back as `other`, which also keeps
+    the desk from offering it to us again for an hour.
   While a generator runs the lease is renewed every 4 minutes; when the desk withdraws the step,
   the generator and its solver processes are stopped at once.
   The desk asks for one request every few seconds at most; rounds are --interval seconds apart.
 Log lines go to stdout; a READY line names a checked step waiting for its pull request."""
-import argparse, json, os, re, signal, subprocess, sys, threading, time
+import argparse, json, os, re, shutil, signal, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
 from gen_dir3 import STMT  # noqa: E402
 import gen_circ, gen_find  # noqa: E402
-from harvest import Harvester  # noqa: E402
+from harvest import Harvester, desk_gate  # noqa: E402
 
 BEAT = 240  # seconds between lease renewals while a generator runs
+DESK = "https://pequalnp.com/desk"
+MAX_HELD = 5  # the desk's limit on steps held at once
+SLOTS = os.path.join(HERE, "out", "slots")  # proofs written by slots, before they go into the fork
+FORK = threading.RLock()  # one fork-touching pnp.sh call at a time
+ACTIVE = {}  # step -> kind, for the steps slots work on now
+ACTIVE_LOCK = threading.Lock()
 
 
 def log(msg):
@@ -33,6 +45,7 @@ def log(msg):
 
 
 def pnp(*args, timeout=None):
+    desk_gate()
     r = subprocess.run([os.path.join(REPO, "tools", "pnp.sh"), *args], cwd=REPO, capture_output=True, text=True,
                        timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
@@ -101,6 +114,27 @@ def known_unsat(h, gid):
     return e.get("why") if e.get("state") == "unsat" else None
 
 
+def beat(gid):
+    """Renew a lease straight at the desk (join.txt: POST /desk/beat?lease=<id>; a 410 means stop).
+    (True, note) while the lease holds or the desk could not be reached; (False, why) when it is gone."""
+    try:
+        lease = json.load(open(os.path.join(REPO, ".pnp", gid + ".json")))["lease"]["id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, "no lease file here"
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", str(lease)):
+        return False, "unreadable lease id"
+    desk_gate()
+    r = subprocess.run(["curl", "--proto", "=https", "-sS", "-m", "15", "-X", "POST", DESK + "/beat?lease=" + lease],
+                       capture_output=True, text=True)
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        return True, "no answer from the desk"
+    if isinstance(d, dict) and isinstance(d.get("lease"), dict):
+        return True, "lease until %s" % d["lease"].get("expires_at")
+    return False, re.sub(r"[^ -~]", " ", str((d or {}).get("error") or "the lease is gone"))[:300]
+
+
 def generate(gid, cmd):
     """Run a generator, renewing the lease while it works; if the desk withdraws the step, stop the
     generator and every process it started. Returns (stdout, stderr, withdrawn)."""
@@ -109,9 +143,9 @@ def generate(gid, cmd):
 
     def beats():
         while not done.wait(BEAT):
-            c, o = pnp("beat", gid)
-            if "STOP" in o:
-                log("%s: desk says stop: %s" % (gid, o.splitlines()[-1]))
+            ok, why = beat(gid)
+            if not ok:
+                log("%s: desk says stop: %s" % (gid, why))
                 withdrawn.set()
                 try:
                     os.killpg(p.pid, signal.SIGTERM)
@@ -174,9 +208,138 @@ def recover():
     st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO, capture_output=True, text=True)
     for line in st.stdout.splitlines():
         path = line[3:]
-        if line.startswith("?? ") and re.fullmatch(r"lean/PEqualNP/Outside/L_meta_(\d+|scratch_R\d+)\.lean", path):
+        if line.startswith("?? ") and re.fullmatch(r"lean/PEqualNP/Outside/L_(meta_scratch_R\d+|[a-z]+_\d+)\.lean", path):
             log("recovering: removing untracked %s" % path)
             os.remove(os.path.join(REPO, path))
+
+
+def finish(gid, path, a):
+    """Under FORK: put a slot's proof in the fork, check it with pnp.sh and send it."""
+    lease = os.path.join(REPO, ".pnp", gid + ".json")
+    if not os.path.exists(lease):
+        log("%s: no longer held; proof not sent" % gid); return
+    g = json.load(open(lease))["gap"]
+    ok, why = beat(gid)
+    if not ok:
+        log("%s: lease withdrawn while working: %s" % (gid, why)); release(gid, "other"); return
+    shutil.copyfile(path, os.path.join(REPO, g["file"]))
+    code, out = pnp("check", gid, timeout=1800)
+    log("%s check: %s" % (gid, out.splitlines()[-1] if out else code))
+    if code != 0:
+        log(out[-1500:]); release(gid, "other"); return
+    if not a.submit:
+        log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (gid, gid)); return
+    prs = others_pr(gid)
+    if prs:
+        log("%s: another agent's pull request is already open (#%s); not sending ours" % (gid, ", #".join(prs)))
+        release(gid, "other"); return
+    code, out = pnp("submit", gid, timeout=600)
+    log("%s submit: %s" % (gid, out[-500:]))
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+    if code == 0:
+        mark_done(gid)
+    else:  # e.g. another agent's pull request came first: give the lease back, drop the file
+        release(gid, "other")
+
+
+def slot(gid, kind, h, a):
+    """One step, in its own thread: run its generator (lease renewed meanwhile), then finish under FORK."""
+    lease = os.path.join(REPO, ".pnp", gid + ".json")
+    out = os.path.join(SLOTS, gid.replace("-", "_") + ".lean")
+    try:
+        gens = {"dir3": ("gen_dir3.py", 1200), "circ": ("gen_circ.py", 1200), "find": ("gen_find.py", 1500),
+                "battery": ("battery.py", 300)}
+        prog, limit = gens[kind]
+        cmd = [sys.executable, "-I", os.path.join(HERE, prog), "--json", lease, "--out", out, "--timeout", str(limit)]
+        gout, gerr, withdrawn = generate(gid, cmd)
+        if withdrawn:
+            with FORK:
+                release(gid, "other")
+            return
+        log("%s: %s" % (gid, (gout.strip() or gerr.strip()[-300:] or "generator gave no output").splitlines()[-1]))
+        if not gout.startswith("PROOF"):
+            reason = "other"
+            if kind in ("find", "circ"):
+                reason = "statement_seems_false" if "UNSAT at every size" in gout else "out_of_time"
+                if h and gid in h.db and "UNSAT at every size" in gout:
+                    h.mark(gid, "unsat", gout.strip().splitlines()[-1])
+            with FORK:
+                release(gid, reason)
+            return
+        with FORK:
+            finish(gid, out, a)
+    except Exception as ex:  # one bad step must not stop the others
+        log("%s: slot failed: %s: %s" % (gid, type(ex).__name__, ex))
+        with FORK:
+            if os.path.exists(lease):
+                release(gid, "other")
+    finally:
+        with ACTIVE_LOCK:
+            ACTIVE.pop(gid, None)
+
+
+def take_step(h, a):
+    """Under FORK: ask the desk for one step and route it. Returns "stop" on the project's STOP notice."""
+    another = ["--another"] if held() else []
+    code, out = pnp("next", *another, "--level", "solid", "--kind", "prove", timeout=120)
+    m = re.search(r"^STEP\s+(L-[a-z]+-\d+) - (.*)$", out, re.M)
+    if code == 120:
+        log("STOP notice from the project: " + out.splitlines()[-1]); return "stop"
+    if not m:
+        log("no step: " + (out.splitlines()[-1] if out else str(code))); return None
+    gid, title = m.group(1), m.group(2)
+    g = json.load(open(os.path.join(REPO, ".pnp", gid + ".json")))["gap"]
+    t = re.search(r"Nat\.testBit \((\d+) \* 2 \^ 32 \+ (\d+)\)", g.get("statement", ""))
+    if t and g["statement"] == "¬ (" + STMT.format(hi=t.group(1), lo=t.group(2)) + ")":
+        # a 'False:' twin: race for its true twin while nobody has sent a pull request for it (rare; in line)
+        log("%s: 'False:' twin; racing for its true twin" % gid)
+        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "race.py"), gid], capture_output=True, text=True)
+        for line in r.stdout.strip().splitlines()[-4:]:
+            log("  race: " + line)
+        pos = "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1)
+        if r.returncode == 0:
+            if not a.submit:
+                log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (pos, pos)); return None
+            prs = others_pr(pos)
+            if prs:
+                log("%s: another agent's pull request is already open (#%s); not sending ours" % (pos, ", #".join(prs)))
+                release(pos, "other"); return None
+            code, out = pnp("submit", pos, timeout=600)
+            log("%s submit: %s" % (pos, out[-500:]))
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+            if code == 0:
+                mark_done(pos)
+            else:
+                release(pos, "other")
+            return None
+        if r.returncode == 3:
+            release(gid, "statement_seems_false")  # its true twin is ours, checked by Lean
+        for x in held():
+            if x in (gid, pos) and x not in ACTIVE:
+                release(x, "other")
+        return None
+    kind = kind_of(g)
+    known = known_unsat(h, gid) if kind in ("find", "circ") else None
+    if known:
+        log("%s: already shown false here (%s); handing it back" % (gid, known[:120]))
+        release(gid, "statement_seems_false"); return None
+    if kind is None:
+        with ACTIVE_LOCK:
+            batteries = sum(1 for k in ACTIVE.values() if k == "battery")
+        if not g.get("file") or not g.get("statement") or batteries >= a.battery_slots:
+            log("%s is not a step this solver proves: %s" % (gid, title[:90]))
+            release(gid, "other"); return None
+        kind = "battery"
+    # the slot writes its proof outside the fork; the skeleton next wrote would block other slots' submits
+    path = os.path.join(REPO, g["file"])
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", g["file"]], cwd=REPO, capture_output=True).returncode == 0
+    if os.path.exists(path) and not tracked:
+        os.remove(path)
+    log("%s: %s step (%s); slot %d of %d" % (gid, kind, title[:90], len(ACTIVE) + 1, a.slots))
+    with ACTIVE_LOCK:
+        ACTIVE[gid] = kind
+    threading.Thread(target=slot, args=(gid, kind, h, a), daemon=True).start()
+    return None
 
 
 def main():
@@ -184,10 +347,14 @@ def main():
     ap.add_argument("--interval", type=float, default=45)
     ap.add_argument("--max-hours", type=float, default=3)
     ap.add_argument("--submit", action="store_true")
+    ap.add_argument("--slots", type=int, default=4, help="desk steps worked on at once (the desk allows 5 held)")
+    ap.add_argument("--battery-slots", type=int, default=2, help="of those, at most this many on the tactic battery")
     ap.add_argument("--harvest-workers", type=int, default=4, help="parallel local proofs of export steps (0: off)")
     ap.add_argument("--submit-gap", type=float, default=300, help="seconds between pull requests of harvested steps")
     a = ap.parse_args()
+    a.slots = max(1, min(a.slots, MAX_HELD - 1))  # one lease kept free for a harvested --proof-of
     stop_at = time.time() + a.max_hours * 3600
+    os.makedirs(SLOTS, exist_ok=True)
     recover()
     if clean_tree():
         sys.exit("the fork has changes that are not ours to remove: %s" % clean_tree())
@@ -199,108 +366,23 @@ def main():
         if os.path.exists(os.path.join(HERE, "PAUSE")):
             time.sleep(60); continue  # remove solver/PAUSE to resume
         if h and time.time() - last_sent >= a.submit_gap and h.ready():
-            r = submit_harvested(h)
+            with FORK:
+                r = submit_harvested(h)
             if r == "sent":
                 last_sent = time.time()
             if r:
                 continue
-        code, out = pnp("next", "--level", "solid", "--kind", "prove", timeout=120)
-        m = re.search(r"^STEP\s+(L-[a-z]+-\d+) - (.*)$", out, re.M)
-        if code == 120:
-            log("STOP notice from the project: " + out.splitlines()[-1]); return 0  # 0: do not restart
-        if not m:
-            log("no step: " + (out.splitlines()[-1] if out else str(code)))
-            time.sleep(a.interval); continue
-        gid, title = m.group(1), m.group(2)
-        g = json.load(open(os.path.join(REPO, ".pnp", gid + ".json")))["gap"]
-        t = re.search(r"Nat\.testBit \((\d+) \* 2 \^ 32 \+ (\d+)\)", g.get("statement", ""))
-        if t and g["statement"] == "¬ (" + STMT.format(hi=t.group(1), lo=t.group(2)) + ")":
-            # a 'False:' twin: race for its true twin while nobody has sent a pull request for it
-            log("%s: 'False:' twin; racing for its true twin" % gid)
-            r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "race.py"), gid], capture_output=True, text=True)
-            for line in r.stdout.strip().splitlines()[-4:]:
-                log("  race: " + line)
-            if r.returncode == 0:
-                pos = "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1)
-                if not a.submit:
-                    log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (pos, pos))
-                    return 0
-                prs = others_pr(pos)
-                if prs:
-                    log("%s: another agent's pull request is already open (#%s); not sending ours" % (pos, ", #".join(prs)))
-                    release(pos, "other"); time.sleep(a.interval); continue
-                code, out = pnp("submit", pos, timeout=600)
-                log("%s submit: %s" % (pos, out[-500:]))
-                subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
-                if code == 0:
-                    mark_done(pos)
-                else:  # e.g. another agent's pull request came first: give the lease back, drop the file
-                    release(pos, "other")
-                time.sleep(a.interval); continue
-            if r.returncode == 3:
-                release(gid, "statement_seems_false")  # its true twin is ours, checked by Lean
-            for h in held():
-                if h == gid or h == "L-meta-%d" % (int(gid.rsplit("-", 1)[1]) - 1):
-                    release(h, "other")
-            time.sleep(a.interval); continue
-        kind = kind_of(g)
-        if kind is None:
-            log("%s is not a step this solver proves: %s" % (gid, title[:90]))
-            release(gid, "other")
-            time.sleep(a.interval); continue
-        lease = os.path.join(REPO, ".pnp", gid + ".json")
-        known = known_unsat(h, gid) if kind in ("find", "circ") else None
-        if known:
-            log("%s: already shown false here (%s); handing it back" % (gid, known[:120]))
-            release(gid, "statement_seems_false")
-            time.sleep(a.interval); continue
-        if kind == "dir3":
-            log("%s: direction-3 positive claim, table %s %s; generating" % (gid, t.group(1), t.group(2)))
-            cmd = [sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json", lease, "--timeout", "1200"]
-        elif kind == "circ":
-            log("%s: circuit step (%s); searching" % (gid, title[:90]))
-            cmd = [sys.executable, "-I", os.path.join(HERE, "gen_circ.py"), "--json", lease, "--timeout", "1200"]
-        else:
-            log("%s: find step (%s); searching" % (gid, title[:90]))
-            cmd = [sys.executable, "-I", os.path.join(HERE, "gen_find.py"), "--json", lease, "--timeout", "1500"]
-        gout, gerr, withdrawn = generate(gid, cmd)
-        if withdrawn:
-            release(gid, "other")
-            time.sleep(a.interval); continue
-        log((gout.strip() or gerr.strip()[-300:] or "generator gave no output").splitlines()[-1])
-        if not gout.startswith("PROOF"):
-            reason = "other"
-            if kind in ("find", "circ"):
-                reason = "statement_seems_false" if "UNSAT at every size" in gout else "out_of_time"
-                if h and gid in h.db and "UNSAT at every size" in gout:
-                    h.mark(gid, "unsat", gout.strip().splitlines()[-1])
-            release(gid, reason)
-            time.sleep(a.interval); continue
-        code, out = pnp("beat", gid)
-        if "STOP" in out:
-            log("%s: lease withdrawn while generating: %s" % (gid, out.splitlines()[-1]))
-            release(gid, "other"); continue
-        code, out = pnp("check", gid, timeout=1800)
-        log("%s check: %s" % (gid, out.splitlines()[-1] if out else code))
-        if code != 0:
-            log(out[-1500:])
-            release(gid, "other"); continue
-        if not a.submit:
-            log("READY %s: checked and held. Submit with: tools/pnp.sh submit %s" % (gid, gid))
-            return 0
-        prs = others_pr(gid)
-        if prs:
-            log("%s: another agent's pull request is already open (#%s); not sending ours" % (gid, ", #".join(prs)))
-            release(gid, "other"); time.sleep(a.interval); continue
-        code, out = pnp("submit", gid, timeout=600)
-        log("%s submit: %s" % (gid, out[-500:]))
-        subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
-        if code == 0:
-            mark_done(gid)
-        else:  # e.g. another agent's pull request came first: give the lease back, drop the file
-            release(gid, "other")
+        with ACTIVE_LOCK:
+            busy = len(ACTIVE)
+        if busy >= a.slots or len(held()) >= MAX_HELD:
+            time.sleep(5); continue
+        with FORK:
+            if take_step(h, a) == "stop":
+                return 0  # 0: do not restart
         time.sleep(a.interval)
-    log("time limit reached")
+    log("time limit reached; waiting for the slots to finish")
+    while ACTIVE:
+        time.sleep(10)
     return 0
 
 

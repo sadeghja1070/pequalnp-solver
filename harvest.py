@@ -2,7 +2,8 @@
 """Find open steps ahead of the desk and prove them locally, so the autopilot can lease each with
 `pnp.sh next --proof-of` (allowed for a step we hold a checked proof of) and submit it.
 
-Discovery: the site's public data export (scan.py) lists every step with its statement; the desk
+Discovery: the site's public data export (scan.py) lists every step of every program with its
+statement (meta: steps a generator reads; the other programs: any step, tried with battery.py); the desk
 (/desk/step, a few seconds apart) says which are still live, since the export also keeps steps
 the fleet stood down. Proving: the generator that fits the statement (gen_dir3, gen_find,
 gen_circ) writes the file under the step's own module name into out/proven/, and Lean checks it
@@ -19,17 +20,31 @@ import argparse, json, os, queue, re, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
-import gen_circ, gen_find, scan  # noqa: E402
+import battery, gen_circ, gen_find, scan  # noqa: E402
 
 STATE = os.path.join(HERE, "out", "harvest.json")
 PROVEN = os.path.join(HERE, "out", "proven")
-PRIORITY = {"dir3": 0, "explicit": 1, "rep": 1, "exists": 2, "find": 3}
+PRIORITY = {"dir3": 0, "explicit": 1, "rep": 1, "exists": 2, "find": 3, "battery": 4}
 DESK_GAP = 5.0          # seconds between this module's desk requests
 DEAD_RECHECK = 24 * 3600  # a stood-down step is asked about again after a day
 
 
 def now():
     return time.time()
+
+
+_gate = threading.Lock()
+_gate_last = [0.0]
+
+
+def desk_gate(gap=3.0):
+    """Space every desk request of this process (autopilot slots, beats, harvester) at least `gap`
+    seconds apart: the desk asks for one request every few seconds at most."""
+    with _gate:
+        wait = _gate_last[0] + gap - now()
+        if wait > 0:
+            time.sleep(wait)
+        _gate_last[0] = now()
 
 
 class Harvester:
@@ -68,7 +83,7 @@ class Harvester:
         return os.path.join(PROVEN, gid.replace("-", "_") + ".lean")
 
     # ---- discovery ----
-    def classify(self, st):
+    def classify(self, st, program="meta"):
         k = scan.kind_of_statement(st)
         if k == "dir3":
             return "dir3"
@@ -81,13 +96,16 @@ class Harvester:
         if flat.startswith(gen_circ.REP):
             return "rep" if gen_circ.read_graph(flat) else None
         lean, _ = gen_circ.explicit("X", flat)
-        return "explicit" if lean else None
+        if lean:
+            return "explicit"
+        return "battery" if program != "meta" else None  # meta's thousands of open steps: generators only
 
     def desk_state(self, gid):
         wait = self.last_desk + DESK_GAP - now()
         if wait > 0:
             time.sleep(wait)
         self.last_desk = now()
+        desk_gate()
         r = subprocess.run(["curl", "--proto", "=https", "-fsS", "-m", "15", "-G", "https://pequalnp.com/desk/step",
                             "--data-urlencode", "gap=" + gid], capture_output=True, text=True)
         try:
@@ -98,7 +116,7 @@ class Harvester:
     def discover(self):
         """One pass over the export: new steps we can prove get their desk state asked; live ones queue."""
         try:
-            res = scan.scan(workers=4)
+            res = scan.scan(workers=4, programs=scan.programs())
         except Exception as e:  # network trouble: try again next round
             self.log("harvest: export scan failed: %s" % e)
             return
@@ -112,7 +130,7 @@ class Harvester:
             if e and e.get("state") == "dead" and now() - e.get("at", 0) < DEAD_RECHECK:
                 continue
             if e is None:
-                kind = self.classify(st)
+                kind = self.classify(st, gid.split("-")[1])
                 if not kind:
                     continue
                 with self.lock:
@@ -147,7 +165,10 @@ class Harvester:
                                 "--table", str(table), "--module", mod, "--out", out, "--timeout", "900"],
                                capture_output=True, text=True)
             return r.stdout.startswith("PROOF"), (r.stdout.strip() or r.stderr.strip()[-200:])
-        lean, why = gen_circ.generate(gid, st, timeout=600)
+        if kind == "battery":
+            lean, why = battery.prove(gid, st, None, timeout=400)
+        else:
+            lean, why = gen_circ.generate(gid, st, timeout=600)
         if lean is None:
             return False, why
         open(out, "w", encoding="utf-8").write(lean)
