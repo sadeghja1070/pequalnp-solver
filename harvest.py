@@ -33,7 +33,7 @@ def now():
 
 
 class Harvester:
-    def __init__(self, log, workers=4, refresh_every=1200):
+    def __init__(self, log, workers=4, refresh_every=300):
         self.log, self.workers, self.refresh_every = log, workers, refresh_every
         self.lock = threading.Lock()
         self.db = json.load(open(STATE)) if os.path.exists(STATE) else {}

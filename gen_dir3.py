@@ -30,6 +30,66 @@ def die(msg):
     sys.exit(1)
 
 
+def best_restriction(arg):
+    """For f with input idx fixed to c: the largest B the kernel search rejects over the sample pair
+    sets tried, with what the template needs; None when the restriction is unusable."""
+    T, idx, c = arg
+    f = lambda r: (T >> r) & 1
+    t5 = restrict(f, idx, c)
+    if t5 in (0, (1 << 32) - 1):
+        return None
+    ydiff = next((y for y in range(32) if f((y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1)))
+                  != f((y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1)) | 1 << idx)), None)
+    if ydiff is None:
+        return None
+    y0 = next(y for y in range(32) if not t5 >> y & 1)
+    y1 = next(y for y in range(32) if t5 >> y & 1)
+    best = None
+    for n, (how, P) in enumerate(pair_sets(t5)):
+        if n >= 40:
+            break
+        W = words(5, P)
+        if len(set(W)) < 5:
+            continue
+        Bmax = largest_rejecting(W)
+        if best is None or Bmax > best[0]:
+            best = (Bmax, idx, c, how, P, t5, ydiff, y0, y1)
+    return best
+
+
+def prune(gates, n=6):
+    """The gates the output (last gate) depends on, renumbered, in the same order."""
+    need, keep = {n + len(gates) - 1}, []
+    for j in range(len(gates) - 1, -1, -1):
+        if n + j in need:
+            keep.append(j)
+            need.update(gates[j][1:])
+    keep.reverse()
+    wire = {i: i for i in range(n)}
+    out = []
+    for j in keep:
+        op, a, b = gates[j]
+        wire[n + j] = n + len(out)
+        out.append((op, wire[a], wire[b]))
+    return out
+
+
+def sat_witnesses(T, top, tag, timeout, below=3, below_timeout=45):
+    """The smallest AND/OR circuit for T that SAT finds at sizes top, top-1, ..., top-below, all
+    solved at once (dead gates allowed, so size s is satisfiable whenever some circuit of at most
+    s gates exists). None if none at top."""
+    import gen_circ
+    from concurrent.futures import ThreadPoolExecutor
+    rows = {r: (T >> r) & 1 for r in range(64)}
+    opts = dict(allow_not=False, none_dead=False, some_not=False, not_on_gate=False)
+    sizes = [s for s in range(top, top - below - 1, -1) if s >= 3]
+    with ThreadPoolExecutor(len(sizes)) as ex:
+        res = list(ex.map(lambda s: gen_circ.solve(6, s, rows, opts, timeout if s == top else below_timeout,
+                                                    "dir3_%s" % tag), sizes))
+    found = [prune([(op, ins[0], ins[1]) for op, ins in g]) for g, _ in res if g]
+    return min(found, key=len) if found else None
+
+
 def find_witness(hi, lo, s, timeout, cores=12):
     """An AND/OR circuit with exactly s gates, by the C search split over `cores` processes; the
     first one found stops the rest. None when every part finished without one, or on timeout."""
@@ -158,34 +218,19 @@ def main():
     t0 = time.time()
     # 1. The strongest kernel-checkable bound: for each input fixed to false, the largest B whose
     #    search rejects on some sample of 64 (true row, false row) pairs.
-    best = None  # (Bmax, idx, c, how, P, t5, ydiff, y0, y1)
-    for idx, c in [(i, c) for c in (0, 1) for i in range(6)]:
-        t5 = restrict(f, idx, c)
-        if t5 in (0, (1 << 32) - 1):
-            continue
-        ydiff = next((y for y in range(32) if f((y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1)))
-                      != f((y & ((1 << idx) - 1)) | ((y >> idx) << (idx + 1)) | 1 << idx)), None)
-        if ydiff is None:
-            continue
-        y0 = next(y for y in range(32) if not t5 >> y & 1)
-        y1 = next(y for y in range(32) if t5 >> y & 1)
-        for n, (how, P) in enumerate(pair_sets(t5)):
-            if n >= 40:
-                break
-            W = words(5, P)
-            if len(set(W)) < 5:
-                continue
-            Bmax = largest_rejecting(W)
-            if best is None or Bmax > best[0]:
-                best = (Bmax, idx, c, how, P, t5, ydiff, y0, y1)
+    from concurrent.futures import ProcessPoolExecutor
+    with ProcessPoolExecutor(12) as ex:
+        cands = [r for r in ex.map(best_restriction, [(T, i, c) for c in (0, 1) for i in range(6)]) if r]
+    best = max(cands, key=lambda r: r[0]) if cands else None  # (Bmax, idx, c, how, P, t5, ydiff, y0, y1)
     if best is None or best[0] < 0:
         die("no usable restriction")
     Bmax, idx, c, how, P, t5, ydiff, y0, y1 = best
     Bmax = min(Bmax, a.max_b)
-    # 2. The smallest AND/OR witness, sizes upward: a size below the minimum must be exhausted (only
-    #    the one just below costs anything), the minimum itself stops at the first circuit found.
-    gates = None
-    for s in range(1, Bmax + 4):
+    # 2. An AND/OR witness of at most Bmax + 3 gates. Any such circuit proves the claim (B = m - 3 is at
+    #    most Bmax, so the kernel search rejects), and a smaller one makes the Lean check faster. SAT
+    #    first, from Bmax + 3 down while it keeps finding one; then the exhaustive search, sizes upward.
+    gates = sat_witnesses(T, Bmax + 3, module, args_timeout)
+    for s in ([] if gates else range(1, Bmax + 4)):
         g, exhausted = find_witness(hi, lo, s, timeout=args_timeout)
         if g is not None:
             gates = g
@@ -194,6 +239,8 @@ def main():
             die("witness search at size %d timed out after %.0fs" % (s, args_timeout))
     if gates is None:
         die("every AND/OR circuit needs more than %d gates, beyond the kernel bound (B at most %d)" % (Bmax + 3, Bmax))
+    if len(gates) < 3:
+        die("witness of %d gates: too small for this proof shape" % len(gates))
     if not all(evaluate(gates, x) == f(x) for x in range(64)):
         die("witness check failed (search bug)")
     m = len(gates)
