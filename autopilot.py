@@ -23,6 +23,7 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
 from gen_dir3 import STMT  # noqa: E402
 import gen_find  # noqa: E402
+from harvest import Harvester  # noqa: E402
 
 BEAT = 240  # seconds between lease renewals while a generator runs
 
@@ -112,6 +113,46 @@ def generate(gid, cmd):
     return out, err, withdrawn.is_set()
 
 
+def submit_harvested(h, log_prefix="harvest"):
+    """Lease one step the harvester proved, with `next --proof-of`, put the checked file in place,
+    check it with pnp.sh and submit it. Returns "sent", "dropped" (lost, refused, failed) or None."""
+    for gid in h.ready():
+        st = h.desk_state(gid)
+        if st not in ("open", "leased"):
+            h.mark(gid, "lost", "desk: " + st); log("%s: %s is %s now; dropped" % (log_prefix, gid, st)); return "dropped"
+        prs = others_pr(gid)
+        if prs:
+            h.mark(gid, "lost", "pull request #" + prs[0]); log("%s: %s already has #%s; dropped" % (log_prefix, gid, prs[0])); return "dropped"
+        code, out = pnp("next", "--proof-of", gid, timeout=120)
+        lease = os.path.join(REPO, ".pnp", gid + ".json")
+        if not os.path.exists(lease):
+            h.mark(gid, "refused", out.splitlines()[-1] if out else str(code))
+            log("%s: the desk did not lease %s: %s" % (log_prefix, gid, h.db[gid]["why"])); return "dropped"
+        g = json.load(open(lease))["gap"]
+        text = open(h.proof_path(gid), encoding="utf-8").read()
+        imports = re.findall(r"^import (\S+)", text, re.M)
+        bad = [m for m in imports if not (m == "Mathlib" or m.startswith("Mathlib.") or m in (g.get("imports") or []))]
+        if g["statement"] != h.statement(gid) or g["module"] != "PEqualNP.Outside." + gid.replace("-", "_") or bad:
+            why = "imports %s not allowed" % bad if bad else "statement or module differs from the export"
+            h.mark(gid, "failed", why); log("%s: %s: %s; handed back" % (log_prefix, gid, why))
+            release(gid, "other"); return "dropped"
+        open(os.path.join(REPO, g["file"]), "w", encoding="utf-8").write(text)
+        code, out = pnp("check", gid, timeout=1800)
+        if code != 0:
+            h.mark(gid, "failed", "check: " + (out.splitlines()[-1] if out else str(code)))
+            log("%s: %s check failed: %s" % (log_prefix, gid, out[-800:])); release(gid, "other"); return "dropped"
+        code, out = pnp("submit", gid, timeout=600)
+        log("%s: %s submit: %s" % (log_prefix, gid, out[-400:]))
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+        if code == 0:
+            mark_done(gid); h.mark(gid, "submitted", out.splitlines()[-1] if out else "")
+        else:
+            h.mark(gid, "failed", "submit: " + (out.splitlines()[-1] if out else str(code))); release(gid, "other")
+            return "dropped"
+        return "sent"
+    return None
+
+
 def recover():
     """Undo what a crash or a kill can leave behind: another branch checked out, a lease held, an
     untracked proof file in the fork. Only untracked files under Outside/ are ever deleted."""
@@ -132,14 +173,26 @@ def main():
     ap.add_argument("--interval", type=float, default=45)
     ap.add_argument("--max-hours", type=float, default=3)
     ap.add_argument("--submit", action="store_true")
+    ap.add_argument("--harvest-workers", type=int, default=4, help="parallel local proofs of export steps (0: off)")
+    ap.add_argument("--submit-gap", type=float, default=300, help="seconds between pull requests of harvested steps")
     a = ap.parse_args()
     stop_at = time.time() + a.max_hours * 3600
     recover()
     if clean_tree():
         sys.exit("the fork has changes that are not ours to remove: %s" % clean_tree())
+    h, last_sent = None, 0.0
+    if a.harvest_workers > 0 and a.submit:
+        h = Harvester(log, a.harvest_workers)
+        h.start()
     while time.time() < stop_at:
         if os.path.exists(os.path.join(HERE, "PAUSE")):
             time.sleep(60); continue  # remove solver/PAUSE to resume
+        if h and time.time() - last_sent >= a.submit_gap and h.ready():
+            r = submit_harvested(h)
+            if r == "sent":
+                last_sent = time.time()
+            if r:
+                continue
         code, out = pnp("next", "--level", "solid", "--kind", "prove", timeout=120)
         m = re.search(r"^STEP\s+(L-[a-z]+-\d+) - (.*)$", out, re.M)
         if code == 120:
