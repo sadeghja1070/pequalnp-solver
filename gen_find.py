@@ -144,8 +144,11 @@ def encode(kind, n, s, table):
         add(x[r][W - 1] if table >> r & 1 else -x[r][W - 1])
     # Symmetry: gates in a greedy-min-key topological order (key: the larger wire read, then the
     # smaller), so a gate that does not read the gate just before it has a key no smaller than it.
-    # Every circuit has such an order, so this removes reorderings only, never a circuit.
-    for j in range(s - 1):
+    # Every circuit has such an order among the gates before the output, so this removes
+    # reorderings only, never a circuit. The output is the last gate and cannot move, so the pair
+    # (s - 2, s - 1) is left out: ordering it too wrongly excluded circuits whose output does not
+    # read the gate just before it (possible when dead gates are allowed, as in tie6).
+    for j in range(s - 2):
         nb = s2[j + 1][n + j]  # gate j+1 reads gate j (its larger wire is the newest one)
         for u in range(n + j):
             for v in range(u):

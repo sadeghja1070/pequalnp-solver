@@ -23,7 +23,7 @@ import gen_circ, gen_find, scan  # noqa: E402
 
 STATE = os.path.join(HERE, "out", "harvest.json")
 PROVEN = os.path.join(HERE, "out", "proven")
-PRIORITY = {"dir3": 0, "explicit": 1, "exists": 2, "find": 3}
+PRIORITY = {"dir3": 0, "explicit": 1, "rep": 1, "exists": 2, "find": 3}
 DESK_GAP = 5.0          # seconds between this module's desk requests
 DEAD_RECHECK = 24 * 3600  # a stood-down step is asked about again after a day
 
@@ -78,6 +78,8 @@ class Harvester:
         if flat.startswith(gen_circ.E):
             _, why = gen_circ.exists("X", flat, 0, parse_only=True)
             return "exists" if why.startswith("PARSED") else None
+        if flat.startswith(gen_circ.REP):
+            return "rep" if gen_circ.read_graph(flat) else None
         lean, _ = gen_circ.explicit("X", flat)
         return "explicit" if lean else None
 

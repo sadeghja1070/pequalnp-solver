@@ -141,9 +141,73 @@ def read_function(c):
     return None
 
 
+REP = "PEqualNP.Represents.RepSizeAtMost "
+TOKEN = re.compile(r"\s*(decide|[uv]\.val|[uv]|\d+|[()+*/%<>=≠≤≥∧∨¬])")
+PY = {"decide": "", "u.val": "u", "v.val": "v", "/": "//", "=": "==", "≠": "!=", "≤": "<=", "≥": ">=",
+      "∧": " and ", "∨": " or ", "¬": " not "}
+
+
+def graph(body, n, m):
+    """A(a, b) for the Lean body of `fun u v => body` (Nat arithmetic on u.val and v.val, comparisons,
+    ∧ ∨ ¬, decide), or None when the body uses anything else. No subtraction (Nat truncates) and no
+    arithmetic on bare u or v (Fin wraps around): those are refused rather than read wrongly."""
+    toks, i = [], 0
+    while i < len(body):
+        mm = TOKEN.match(body, i)
+        if not mm:
+            return None
+        toks.append(mm.group(1)); i = mm.end()
+    for j, t in enumerate(toks):
+        if t in ("u", "v") and any(x in "+*/%" for x in toks[max(0, j - 1):j] + toks[j + 1:j + 2]):
+            return None
+    expr = " ".join(PY.get(t, t) for t in toks).strip()
+    try:
+        code = compile(expr, "<graph>", "eval")
+        return {(a, b): int(bool(eval(code, {"__builtins__": {}}, {"u": a, "v": b}))) for a in range(n) for b in range(m)}
+    except Exception:
+        return None
+
+
+def read_graph(st):
+    """(n, m, k, A) for `RepSizeAtMost (fun u v : Fin n => body) k` (or with (u : Fin n) (v : Fin m))."""
+    mm = re.fullmatch(re.escape(REP) + r"\(fun (?:u v : Fin (\d+)|\(u : Fin (\d+)\) \(v : Fin (\d+)\)) => (.*)\) (\d+)", st)
+    if not mm:
+        return None
+    n = int(mm.group(1) or mm.group(2)); m = int(mm.group(1) or mm.group(3))
+    if n + m > 48:
+        return None
+    A = graph(mm.group(4), n, m)
+    return None if A is None else (n, m, int(mm.group(5)), A)
+
+
+def rep_size(mod, st, timeout, parse_only=False):
+    """RepSizeAtMost A k: a SAT-found AND/OR circuit of at most k gates on n + m wires, right on the
+    n * m inputs with one vertex on each side (all Represents asks)."""
+    r = read_graph(st)
+    if r is None:
+        return None, "SKIP: graph not recognised"
+    n, m, k, A = r
+    rows = {(1 << a) | (1 << (n + b)): v for (a, b), v in A.items()}
+    if parse_only:
+        return None, "PARSED: %d by %d graph, k=%d" % (n, m, k)
+    gates, no = solve(n + m, k, rows, dict(allow_not=False, none_dead=False, some_not=False, not_on_gate=False),
+                      timeout, mod)
+    if not gates:
+        return None, "NO PROOF: UNSAT at every size up to %d" % k if no else "NO PROOF: no circuit found in %.0fs" % timeout
+    assert all(evaluate(gates, n + m, r) == v for r, v in rows.items())
+    g = ", ".join("⟨.%s, [%s]⟩" % (op, ", ".join(map(str, ins))) for op, ins in gates)
+    body = ("  unfold PEqualNP.Represents.RepSizeAtMost\n"
+            "  refine ⟨⟨[%s], %d⟩, ?_, ?_, ?_⟩\n"
+            "  · simp [PEqualNP.MetaComplexity.Monotone2]\n"
+            "  · decide\n"
+            "  · decide +kernel\n") % (g, n + m + len(gates) - 1)
+    return HEADER + "theorem PEqualNP.Outside.%s : %s := by\n%s" % (mod, st, body), \
+        "represents, %d by %d graph, %d gates (k=%d)" % (n, m, len(gates), k)
+
+
 # ---- SAT ----
 
-def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate):
+def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate, sym=True):
     nv = [0]
     def new():
         nv[0] += 1
@@ -173,7 +237,7 @@ def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate):
                 add(-s1[j][a], -s2[j][b], N[j])
             if allow_not:
                 add(-N[j], -s1[j][a], s2[j][a])
-    for j in range(s - 1):  # canonical greedy-min-key order (see gen_find.py)
+    for j in range(s - 2 if sym else 0):  # canonical greedy-min-key order before the output (see gen_find.py)
         nb = s2[j + 1][n + j]
         for u in range(n + j):
             for v in range(u):
@@ -223,26 +287,51 @@ def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate):
 
 
 def solve(n, s, rows, opts, timeout, tag):
-    nv, cls, decode = encode(n, s, rows, **opts)
-    path = os.path.join(HERE, "out", "circ_%s_%d.cnf" % (tag, s))
-    with open(path, "w") as f:
-        f.write("p cnf %d %d\n" % (nv, len(cls)))
-        f.writelines(" ".join(map(str, c)) + " 0\n" for c in cls)
+    """(gates, unsat) for a circuit of s gates. Two encodings race: without the symmetry clauses
+    CaDiCaL finds circuits quickly; with them it proves that none exists sooner. Both are sound,
+    so the first decisive answer stands and the other run is stopped."""
+    runs = []
     try:
-        r = subprocess.run([cadical(), "-q", "-t", str(max(1, int(timeout))), path], capture_output=True, text=True)
-    finally:
-        os.remove(path)
-    if r.returncode == 20:
-        return None, True
-    if r.returncode != 10:
+        for sym in (False, True):
+            nv, cls, decode = encode(n, s, rows, sym=sym, **opts)
+            path = os.path.join(HERE, "out", "circ_%s_%d_%d.cnf" % (tag, s, sym))
+            with open(path, "w") as f:
+                f.write("p cnf %d %d\n" % (nv, len(cls)))
+                f.writelines(" ".join(map(str, c)) + " 0\n" for c in cls)
+            out = open(path + ".out", "w")
+            p = subprocess.Popen([cadical(), "-q", "-t", str(max(1, int(timeout))), path], stdout=out,
+                                 stderr=subprocess.DEVNULL)
+            runs.append((p, path, nv, decode, out))
+        deadline = time.time() + timeout + 10
+        while time.time() < deadline:
+            live = 0
+            for p, path, nv, decode, out in runs:
+                if p.poll() is None:
+                    live += 1
+                    continue
+                if p.returncode == 20:
+                    return None, True
+                if p.returncode == 10:
+                    out.flush()
+                    model = [False] * (nv + 1)
+                    for line in open(path + ".out"):
+                        if line.startswith("v "):
+                            for v in map(int, line[2:].split()):
+                                if v > 0:
+                                    model[v] = True
+                    return decode(model), False
+            if not live:
+                break
+            time.sleep(0.2)
         return None, False
-    model = [False] * (nv + 1)
-    for line in r.stdout.splitlines():
-        if line.startswith("v "):
-            for v in map(int, line[2:].split()):
-                if v > 0:
-                    model[v] = True
-    return decode(model), False
+    finally:
+        for p, path, nv, decode, out in runs:
+            if p.poll() is None:
+                p.kill(); p.wait()
+            out.close()
+            for f in (path, path + ".out"):
+                if os.path.exists(f):
+                    os.remove(f)
 
 
 def evaluate(gates, n, r):
@@ -340,12 +429,24 @@ def exists(mod, st, timeout, parse_only=False):
         "exists, %d inputs, %d gates (k=%d)" % (n, len(gates), k)
 
 
+def parses(st):
+    """True when generate() would try this statement (a cheap check, no SAT)."""
+    flat = re.sub(r"\s+", " ", st).strip()
+    if flat.startswith(E):
+        return exists("X", flat, 0, parse_only=True)[1].startswith("PARSED")
+    if flat.startswith(REP):
+        return read_graph(flat) is not None
+    return explicit("X", flat)[0] is not None
+
+
 def generate(gid, st, timeout=600):
     """Parse a whitespace-normalised copy; the theorem states the statement exactly as given."""
     mod = gid.replace("-", "_")
     flat = re.sub(r"\s+", " ", st).strip()
     if flat.startswith(E):
         lean, why = exists(mod, flat, timeout)
+    elif flat.startswith(REP):
+        lean, why = rep_size(mod, flat, timeout)
     else:
         lean, why = explicit(mod, flat)
     if lean is not None:

@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
 from gen_dir3 import STMT  # noqa: E402
-import gen_find  # noqa: E402
+import gen_circ, gen_find  # noqa: E402
 from harvest import Harvester  # noqa: E402
 
 BEAT = 240  # seconds between lease renewals while a generator runs
@@ -87,7 +87,18 @@ def kind_of(g):
                 return "find"
         except (AttributeError, ValueError):
             pass
+    if gen_circ.parses(st):
+        return "circ"
     return None
+
+
+def known_unsat(h, gid):
+    """The harvester's verdict line when it already showed this step false (no circuit at any size)."""
+    try:
+        e = (h.db if h else json.load(open(os.path.join(HERE, "out", "harvest.json")))).get(gid) or {}
+    except (OSError, ValueError):
+        return None
+    return e.get("why") if e.get("state") == "unsat" else None
 
 
 def generate(gid, cmd):
@@ -238,9 +249,17 @@ def main():
             release(gid, "other")
             time.sleep(a.interval); continue
         lease = os.path.join(REPO, ".pnp", gid + ".json")
+        known = known_unsat(h, gid) if kind in ("find", "circ") else None
+        if known:
+            log("%s: already shown false here (%s); handing it back" % (gid, known[:120]))
+            release(gid, "statement_seems_false")
+            time.sleep(a.interval); continue
         if kind == "dir3":
             log("%s: direction-3 positive claim, table %s %s; generating" % (gid, t.group(1), t.group(2)))
             cmd = [sys.executable, "-I", os.path.join(HERE, "gen_dir3.py"), "--json", lease, "--timeout", "1200"]
+        elif kind == "circ":
+            log("%s: circuit step (%s); searching" % (gid, title[:90]))
+            cmd = [sys.executable, "-I", os.path.join(HERE, "gen_circ.py"), "--json", lease, "--timeout", "1200"]
         else:
             log("%s: find step (%s); searching" % (gid, title[:90]))
             cmd = [sys.executable, "-I", os.path.join(HERE, "gen_find.py"), "--json", lease, "--timeout", "1500"]
@@ -251,8 +270,10 @@ def main():
         log((gout.strip() or gerr.strip()[-300:] or "generator gave no output").splitlines()[-1])
         if not gout.startswith("PROOF"):
             reason = "other"
-            if kind == "find":
+            if kind in ("find", "circ"):
                 reason = "statement_seems_false" if "UNSAT at every size" in gout else "out_of_time"
+                if h and gid in h.db and "UNSAT at every size" in gout:
+                    h.mark(gid, "unsat", gout.strip().splitlines()[-1])
             release(gid, reason)
             time.sleep(a.interval); continue
         code, out = pnp("beat", gid)
