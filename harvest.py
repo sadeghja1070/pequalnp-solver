@@ -21,10 +21,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
 import battery, gen_circ, gen_find, scan  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, "pcx"))
+import gen_pcx  # noqa: E402
 
 STATE = os.path.join(HERE, "out", "harvest.json")
 PROVEN = os.path.join(HERE, "out", "proven")
-PRIORITY = {"dir3": 0, "explicit": 1, "rep": 1, "exists": 2, "find": 3, "battery": 4}
+PRIORITY = {"dir3": 0, "explicit": 1, "rep": 1, "pcx": 1, "exists": 2, "find": 3, "battery": 4}
 DESK_GAP = 5.0          # seconds between this module's desk requests
 DEAD_RECHECK = 24 * 3600  # a stood-down step is asked about again after a day
 
@@ -55,6 +57,10 @@ class Harvester:
         self.q = queue.PriorityQueue()
         self.last_desk = 0.0
         self.busy = set()  # steps a worker is proving right now
+        gen_circ.NICE = 10  # in this process gen_circ runs for the harvester only (desk slots run it as a program)
+        for e in self.db.values():  # steps first tried with the battery that gen_pcx reads now
+            if e.get("kind") == "battery" and gen_pcx.read_statement(e.get("statement") or ""):
+                e.update(kind="pcx", state="new")
         os.makedirs(PROVEN, exist_ok=True)
 
     # ---- bookkeeping ----
@@ -98,6 +104,8 @@ class Harvester:
         lean, _ = gen_circ.explicit("X", flat)
         if lean:
             return "explicit"
+        if gen_pcx.read_statement(st):
+            return "pcx"
         return "battery" if program != "meta" else None  # meta's thousands of open steps: generators only
 
     def desk_state(self, gid):
@@ -142,6 +150,14 @@ class Harvester:
                 found += 1
             elif s in ("not_open", "pr_open"):
                 self.mark(gid, "dead", s)
+        # a refutation-length step tried before: again once a short enough refutation is on file
+        with self.lock:
+            retry = [gid for gid, e in self.db.items() if e.get("kind") == "pcx" and e.get("state") == "failed"]
+        for gid in retry:
+            r = gen_pcx.read_statement(self.db[gid]["statement"])
+            lines = gen_pcx.best(r[1], r[2]) if r else None
+            if lines and len(lines) <= r[3]:
+                self.mark(gid, "new", "a refutation of %d lines is on file" % len(lines))
         # steps left live by an earlier run (killed mid-proof) queue again
         with self.lock:
             stale = [gid for gid, e in self.db.items() if e.get("state") == "live"]
@@ -165,7 +181,9 @@ class Harvester:
                                 "--table", str(table), "--module", mod, "--out", out, "--timeout", "900"],
                                capture_output=True, text=True)
             return r.stdout.startswith("PROOF"), (r.stdout.strip() or r.stderr.strip()[-200:])
-        if kind == "battery":
+        if kind == "pcx":
+            lean, why = gen_pcx.generate(gid, st)
+        elif kind == "battery":
             lean, why = battery.prove(gid, st, None, timeout=400)
         else:
             lean, why = gen_circ.generate(gid, st, timeout=600)

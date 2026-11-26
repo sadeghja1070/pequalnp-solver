@@ -29,6 +29,8 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
 sys.path.insert(0, HERE)
 from gen_dir3 import STMT  # noqa: E402
 import gen_circ, gen_find  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, "pcx"))
+import gen_pcx  # noqa: E402
 from harvest import Harvester, desk_gate  # noqa: E402
 
 BEAT = 240  # seconds between lease renewals while a generator runs
@@ -102,6 +104,11 @@ def kind_of(g):
             pass
     if gen_circ.parses(st):
         return "circ"
+    r = gen_pcx.read_statement(st)
+    if r:
+        lines = gen_pcx.best(r[1], r[2])
+        if lines and len(lines) <= r[3]:
+            return "pcx"
     return None
 
 
@@ -248,7 +255,7 @@ def slot(gid, kind, h, a):
     out = os.path.join(SLOTS, gid.replace("-", "_") + ".lean")
     try:
         gens = {"dir3": ("gen_dir3.py", 1200), "circ": ("gen_circ.py", 1200), "find": ("gen_find.py", 1500),
-                "battery": ("battery.py", 300)}
+                "battery": ("battery.py", 300), "pcx": (os.path.join("pcx", "gen_pcx.py"), 120)}
         prog, limit = gens[kind]
         cmd = [sys.executable, "-I", os.path.join(HERE, prog), "--json", lease, "--out", out, "--timeout", str(limit)]
         gout, gerr, withdrawn = generate(gid, cmd)

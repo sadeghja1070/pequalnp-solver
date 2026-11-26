@@ -1,3 +1,6 @@
 out/
 minckt
 __pycache__/
+pcx/*.cnf
+pcx/res_*.log
+pcx/res_*.json

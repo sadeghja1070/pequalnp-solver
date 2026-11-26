@@ -68,6 +68,7 @@ def tactic(c):
 
 # ---- the function a circuit must compute: rows {input bits: value} over `n` inputs ----
 
+NICE = 0  # the harvester sets 10: its searches yield the CPU to the autopilot's desk steps
 MAXN = 12  # more inputs than this: too many rows for the SAT encoding and for decide
 
 
@@ -310,7 +311,7 @@ def solve(n, s, rows, opts, timeout, tag):
                 f.write("p cnf %d %d\n" % (nv, len(cls)))
                 f.writelines(" ".join(map(str, c)) + " 0\n" for c in cls)
             out = open(path + ".out", "w")
-            p = subprocess.Popen([cadical(), "-q", "-t", str(max(1, int(timeout))), path], stdout=out,
+            p = subprocess.Popen((["nice", "-n", str(NICE)] if NICE else []) + [cadical(), "-q", "-t", str(max(1, int(timeout))), path], stdout=out,
                                  stderr=subprocess.DEVNULL)
             runs.append((p, path, nv, decode, out))
         deadline = time.time() + timeout + 10
