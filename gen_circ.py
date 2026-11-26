@@ -123,6 +123,13 @@ def read_function(c):
     if m:
         n, k = int(m.group(1)), int(m.group(2))
         return rows_full(n, lambda x: int(sum(x) >= k))
+    m = re.fullmatch(r"∀ i j : Fin (\d+), C\.eval \(List\.ofFn fun (\w+) : Fin \1 => decide \(\2 = i ∨ \2 = j\)\) = "
+                     r"\((\d+) : ℕ\)\.testBit \((\d+) \* min i\.val j\.val \+ max i\.val j\.val\)", u)
+    if m:  # the two-lit function of a graph: inputs with one or two of the n wires on
+        n, M, K = int(m.group(1)), int(m.group(3)), int(m.group(4))
+        if n > 2 * MAXN:
+            return None
+        return n, {(1 << a) | (1 << b): (M >> (K * a + b)) & 1 for a in range(n) for b in range(a, n)}
     m = re.fullmatch(r"PEqualNP\.Represents\.Represents \(fun u v : Fin (\d+) => (.*)\) C", u)
     if m:
         n, body = int(m.group(1)), m.group(2)
@@ -151,6 +158,10 @@ def graph(body, n, m):
     """A(a, b) for the Lean body of `fun u v => body` (Nat arithmetic on u.val and v.val, comparisons,
     ∧ ∨ ¬, decide), or None when the body uses anything else. No subtraction (Nat truncates) and no
     arithmetic on bare u or v (Fin wraps around): those are refused rather than read wrongly."""
+    mm = re.fullmatch(r"\((\d+) : ℕ\)\.testBit \((\d+) \* u\.val \+ v\.val\)", body)
+    if mm:  # a graph given by the bits of a mask
+        M, K = int(mm.group(1)), int(mm.group(2))
+        return {(a, b): (M >> (K * a + b)) & 1 for a in range(n) for b in range(m)}
     toks, i = [], 0
     while i < len(body):
         mm = TOKEN.match(body, i)
@@ -431,7 +442,7 @@ def exists(mod, st, timeout, parse_only=False):
 
 def parses(st):
     """True when generate() would try this statement (a cheap check, no SAT)."""
-    flat = re.sub(r"\s+", " ", st).strip()
+    flat = unparen(re.sub(r"\s+", " ", st).strip())
     if flat.startswith(E):
         return exists("X", flat, 0, parse_only=True)[1].startswith("PARSED")
     if flat.startswith(REP):
@@ -442,7 +453,7 @@ def parses(st):
 def generate(gid, st, timeout=600):
     """Parse a whitespace-normalised copy; the theorem states the statement exactly as given."""
     mod = gid.replace("-", "_")
-    flat = re.sub(r"\s+", " ", st).strip()
+    flat = unparen(re.sub(r"\s+", " ", st).strip())  # some statements come wrapped in one pair of brackets
     if flat.startswith(E):
         lean, why = exists(mod, flat, timeout)
     elif flat.startswith(REP):

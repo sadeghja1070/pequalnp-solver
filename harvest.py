@@ -74,7 +74,7 @@ class Harvester:
             return "dir3"
         if k:
             return "find"
-        flat = re.sub(r"\s+", " ", st).strip()
+        flat = gen_circ.unparen(re.sub(r"\s+", " ", st).strip())
         if flat.startswith(gen_circ.E):
             _, why = gen_circ.exists("X", flat, 0, parse_only=True)
             return "exists" if why.startswith("PARSED") else None
