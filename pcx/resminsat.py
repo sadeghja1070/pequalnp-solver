@@ -9,7 +9,7 @@ R = C.erase (v, true) ∪ D.erase (v, false).
 
 usage: resminsat.py M N L [--out cert.json] [--timeout S]
 Prints SAT with the proof (and writes it as JSON lines [clause, hint]) or UNSAT."""
-import argparse, glob, itertools, json, os, subprocess, sys, time
+import argparse, glob, itertools, json, os, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -42,11 +42,12 @@ class Enc:
             self.add(-xs[-1], -s[-1])
 
 
-def encode(m, n, L):
+def encode(m, n, L, premises=None, order=True):
+    """premises: the fixed first lines (default: the axioms); L counts them."""
     V = [(i, j) for i in range(m) for j in range(n)]
     lits = [(v, b) for v in V for b in (True, False)]
     li = {l: k for k, l in enumerate(lits)}
-    F = php(m, n)
+    F = premises if premises is not None else php(m, n)
     A = len(F)
     e = Enc()
     lit = [[e.var() for _ in lits] for _ in range(L)]
@@ -85,11 +86,34 @@ def encode(m, n, L):
         hint[t] = (p1, p2, pv)
     for k in range(len(lits)):
         e.add(-lit[L - 1][k])
+    # Lines that do not depend on each other can be listed in either order. When line t does not use
+    # line t-1, ask line t-1 to come first in a fixed order of clauses (lexicographic on the literal
+    # bits): any refutation can be brought to this form by swapping such neighbours (each swap removes
+    # one inversion, and swaps keep every premise before its use). The last line (the empty clause)
+    # stays where it is.
+    if order:
+        K = len(lits)
+        for t in range(A + 1, L - 1):
+            x, y = lit[t - 1], lit[t]
+            s = [e.var() for _ in range(K)]
+            q = [None] + [e.var() for _ in range(1, K)]  # q[k]: x and y agree on bits 0..k-1
+            e.add(hint[t][0][t - 1], hint[t][1][t - 1], *s)
+            for k in range(K):
+                e.add(-s[k], -x[k]); e.add(-s[k], y[k])
+                if k:
+                    e.add(-s[k], q[k])
+                    e.add(-q[k], -x[k - 1], y[k - 1]); e.add(-q[k], x[k - 1], -y[k - 1])
+                    if k > 1:
+                        e.add(-q[k], q[k - 1])
     # every derived line but the last is a premise of a later line (a shortest refutation has no dead line)
     for t in range(A, L - 1):
         e.add(*[x for u in range(t + 1, L) for x in (hint[u][0][t], hint[u][1][t])])
-    # pigeons and holes can be renamed (the axioms are put back in their order): the last pivot is (0, 0)
-    e.add(hint[L - 1][2][V.index((0, 0))])
+    # pigeons and holes can be renamed (the axioms are put back in their order): the last pivot is (0, 0).
+    # Only with the axioms alone as premises: other premises tell pigeons apart, and the cut would be unsound.
+    if premises is None:
+        e.add(hint[L - 1][2][V.index((0, 0))])
+    else:  # holes are still all alike when every premise set is closed under renaming holes: last pivot in hole 0
+        e.add(*[hint[L - 1][2][k] for k, v in enumerate(V) if v[1] == 0])
     return e, lit, hint, lits, V, F
 
 
@@ -97,8 +121,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("m", type=int); ap.add_argument("n", type=int); ap.add_argument("L", type=int)
     ap.add_argument("--out"); ap.add_argument("--timeout", type=int, default=3600)
+    ap.add_argument("--no-order", action="store_true", help="drop the line-order symmetry cut")
+    ap.add_argument("--premises", help="JSON list of clauses to take as the first lines (instead of the axioms); "
+                                       "L is then the number of premises plus resolvents")
     a = ap.parse_args()
-    e, lit, hint, lits, V, F = encode(a.m, a.n, a.L)
+    prem = None
+    if a.premises:
+        prem = [sorted((tuple(v), b) for v, b in C) for C in json.load(open(a.premises))]
+    e, lit, hint, lits, V, F = encode(a.m, a.n, a.L, prem, not a.no_order)
     path = os.path.join(HERE, "res_%d_%d_%d_%d.cnf" % (a.m, a.n, a.L, os.getpid()))
     with open(path, "w") as f:
         f.write("p cnf %d %d\n" % (e.n, len(e.cls)))
@@ -106,8 +136,16 @@ def main():
             f.write(" ".join(map(str, c)) + " 0\n")
     cad = sorted(glob.glob(os.path.expanduser("~/.elan/toolchains/*/bin/cadical")))[-1]
     t0 = time.time()
-    r = subprocess.run([cad, "-q", "-t", str(a.timeout), path], capture_output=True, text=True)
-    os.remove(path)
+    # the solver must not outlive this script: a kill here (SIGTERM, SIGINT) stops it and removes the file
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    proc = subprocess.Popen([cad, "-q", "-t", str(a.timeout), path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, _ = proc.communicate()
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait()
+        os.remove(path)
+    r = subprocess.CompletedProcess(proc.args, proc.returncode, out, "")
     dt = time.time() - t0
     if r.returncode == 20:
         print("UNSAT: no resolution refutation of PHP(%d,%d) with %d lines (%.0fs, %d vars, %d clauses)"
