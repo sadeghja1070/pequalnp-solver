@@ -42,8 +42,9 @@ class Enc:
             self.add(-xs[-1], -s[-1])
 
 
-def encode(m, n, L, premises=None, order=True):
-    """premises: the fixed first lines (default: the axioms); L counts them."""
+def encode(m, n, L, premises=None, order=True, targets=None):
+    """premises: the fixed first lines (default: the axioms); L counts them. targets: clauses the derived
+    lines must include (a derivation of them, instead of a refutation)."""
     V = [(i, j) for i in range(m) for j in range(n)]
     lits = [(v, b) for v in V for b in (True, False)]
     li = {l: k for k, l in enumerate(lits)}
@@ -84,8 +85,18 @@ def encode(m, n, L, premises=None, order=True):
                 e.add(-d[k], lit[t][k], lit[p][k]); e.add(-d[k], -lit[t][k], -lit[p][k])
         # resolvents in order of their second premise, a cheap symmetry cut: none
         hint[t] = (p1, p2, pv)
-    for k in range(len(lits)):
-        e.add(-lit[L - 1][k])
+    if targets is None:  # a refutation: the last line is the empty clause
+        for k in range(len(lits)):
+            e.add(-lit[L - 1][k])
+    tz = []  # tz[i][t - A]: derived line t is target i
+    for C in targets or []:
+        s = {li[l] for l in C}
+        z = [e.var() for _ in range(A, L)]
+        e.add(*z)
+        for t in range(A, L):
+            for k in range(len(lits)):
+                e.add(-z[t - A], lit[t][k] if k in s else -lit[t][k])
+        tz.append(z)
     # Lines that do not depend on each other can be listed in either order. When line t does not use
     # line t-1, ask line t-1 to come first in a fixed order of clauses (lexicographic on the literal
     # bits): any refutation can be brought to this form by swapping such neighbours (each swap removes
@@ -93,7 +104,7 @@ def encode(m, n, L, premises=None, order=True):
     # stays where it is.
     if order:
         K = len(lits)
-        for t in range(A + 1, L - 1):
+        for t in range(A + 1, L - 1 if targets is None else L):
             x, y = lit[t - 1], lit[t]
             s = [e.var() for _ in range(K)]
             q = [None] + [e.var() for _ in range(1, K)]  # q[k]: x and y agree on bits 0..k-1
@@ -106,11 +117,14 @@ def encode(m, n, L, premises=None, order=True):
                     if k > 1:
                         e.add(-q[k], q[k - 1])
     # every derived line but the last is a premise of a later line (a shortest refutation has no dead line)
-    for t in range(A, L - 1):
-        e.add(*[x for u in range(t + 1, L) for x in (hint[u][0][t], hint[u][1][t])])
+    # (with targets: every derived line is a target or a premise of a later line)
+    for t in range(A, L - 1 if targets is None else L):
+        e.add(*[x for u in range(t + 1, L) for x in (hint[u][0][t], hint[u][1][t])], *[z[t - A] for z in tz])
     # pigeons and holes can be renamed (the axioms are put back in their order): the last pivot is (0, 0).
     # Only with the axioms alone as premises: other premises tell pigeons apart, and the cut would be unsound.
-    if premises is None:
+    if targets is not None:
+        pass  # no last pivot to fix
+    elif premises is None:
         e.add(hint[L - 1][2][V.index((0, 0))])
     else:  # holes are still all alike when every premise set is closed under renaming holes: last pivot in hole 0
         e.add(*[hint[L - 1][2][k] for k, v in enumerate(V) if v[1] == 0])
@@ -124,11 +138,13 @@ def main():
     ap.add_argument("--no-order", action="store_true", help="drop the line-order symmetry cut")
     ap.add_argument("--premises", help="JSON list of clauses to take as the first lines (instead of the axioms); "
                                        "L is then the number of premises plus resolvents")
+    ap.add_argument("--targets", help="JSON list of clauses to derive (instead of the empty clause)")
     a = ap.parse_args()
     prem = None
     if a.premises:
         prem = [sorted((tuple(v), b) for v, b in C) for C in json.load(open(a.premises))]
-    e, lit, hint, lits, V, F = encode(a.m, a.n, a.L, prem, not a.no_order)
+    tg = [sorted((tuple(v), b) for v, b in C) for C in json.load(open(a.targets))] if a.targets else None
+    e, lit, hint, lits, V, F = encode(a.m, a.n, a.L, prem, not a.no_order, tg)
     path = os.path.join(HERE, "res_%d_%d_%d_%d.cnf" % (a.m, a.n, a.L, os.getpid()))
     with open(path, "w") as f:
         f.write("p cnf %d %d\n" % (e.n, len(e.cls)))

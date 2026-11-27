@@ -7,3 +7,5 @@ pcx/res_*.json
 pcx/ord_*.log
 pcx/ord_*.json
 pcx/old/
+pcx/tw_*.log
+pcx/tw_*.json
