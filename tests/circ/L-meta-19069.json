@@ -1,0 +1,5 @@
+{
+ "id": "L-meta-19069",
+ "title": "The 4 by 4 bipartite graph with mask 382 is represented on the one-a-side promise by an AND/OR/NOT circuit of fan-in two with at most 7 gates",
+ "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.FanInTwo C ∧ C.size ≤ 7 ∧ PEqualNP.Represents.Represents (fun u v : Fin 4 => (382 : ℕ).testBit (4 * u.val + v.val)) C"
+}

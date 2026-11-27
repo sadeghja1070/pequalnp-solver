@@ -16,7 +16,7 @@ make it skip the step.
 usage: gen_circ.py --id L-meta-N --statement-file F [--out FILE] [--timeout S]
        gen_circ.py --json <.pnp/L-meta-N.json> [--out FILE]
 Prints one verdict line (PROOF / NO PROOF / SKIP)."""
-import argparse, json, os, re, subprocess, sys, time, threading
+import argparse, itertools, json, os, re, subprocess, sys, time, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -70,6 +70,8 @@ def tactic(c):
 
 NICE = 0  # the harvester sets 10: its searches yield the CPU to the autopilot's desk steps
 MAXN = 12  # more inputs than this: too many rows for the SAT encoding and for decide
+CUT_LIMIT = 90  # seconds for a case of a cut (opening gates fixed): on 3 by 3 perfect matching at 11 and 12
+                # gates, 15 minutes found no circuit and no refutation; a quick look, then the slot is free
 
 
 def rows_full(n, f):
@@ -84,6 +86,10 @@ def read_function(c):
     m = re.fullmatch(r"∀ x : Fin (\d+) → Bool, C\.eval \(List\.ofFn x\) = \(fun (\w+) : Fin (\d+) → Bool => (.*)\) x", u)
     if m and m.group(1) == m.group(3):
         n, v, body = int(m.group(1)), m.group(2), m.group(4)
+    else:  # the same OR of ANDs written on x directly: C.eval (List.ofFn x) = ((x 0 && x 4) || ...)
+        m = re.fullmatch(r"∀ x : Fin (\d+) → Bool, C\.eval \(List\.ofFn x\) = \((\(x \d+(?: && x \d+)*\)(?: \|\| \(x \d+(?: && x \d+)*\))*)\)", u)
+        n, v, body = (int(m.group(1)), "x", m.group(2)) if m else (None, None, None)
+    if n is not None:
         terms = []
         for t in body.split(" || "):
             t = t[1:-1] if t.startswith("(") and t.endswith(")") else t
@@ -131,21 +137,16 @@ def read_function(c):
         if n > 2 * MAXN:
             return None
         return n, {(1 << a) | (1 << b): (M >> (K * a + b)) & 1 for a in range(n) for b in range(a, n)}
-    m = re.fullmatch(r"PEqualNP\.Represents\.Represents \(fun u v : Fin (\d+) => (.*)\) C", u)
+    m = re.fullmatch(r"PEqualNP\.Represents\.Represents \(fun (?:u v : Fin (\d+)|\(u : Fin (\d+)\) \(v : Fin (\d+)\)) => (.*)\) C", u)
     if m:
-        n, body = int(m.group(1)), m.group(2)
-        if 2 * n > 2 * MAXN:
+        n, k = int(m.group(1) or m.group(2)), int(m.group(1) or m.group(3))
+        if n + k > 2 * MAXN:
             return None
-        mm = re.fullmatch(r"\((\d+) : ℕ\)\.testBit \((\d+) \* u\.val \+ v\.val\)", body)
-        if mm:
-            M, K = int(mm.group(1)), int(mm.group(2))
-            A = lambda a, b: (M >> (K * a + b)) & 1
-        elif body == "decide (u ≠ v)":
-            A = lambda a, b: int(a != b)
-        else:
+        A = graph(m.group(4), n, k)
+        if A is None:
             return None
-        # inputs: n left wires then n right wires; rows only where exactly one of each is on
-        return 2 * n, {(1 << a) | (1 << (n + b)): A(a, b) for a in range(n) for b in range(n)}
+        # inputs: n left wires then k right wires; rows only where exactly one of each is on
+        return n + k, {(1 << a) | (1 << (n + b)): A[(a, b)] for a in range(n) for b in range(k)}
     return None
 
 
@@ -163,6 +164,10 @@ def graph(body, n, m):
     if mm:  # a graph given by the bits of a mask
         M, K = int(mm.group(1)), int(mm.group(2))
         return {(a, b): (M >> (K * a + b)) & 1 for a in range(n) for b in range(m)}
+    mm = re.fullmatch(r"\(\(\[(\d+(?:, \d+)*)\] : List ℕ\)\.getD u\.val 0\)\.testBit v\.val", body)
+    if mm:  # a graph given by its rows: row u is a mask of its right neighbours (getD: 0 past the end)
+        R = [int(t) for t in mm.group(1).split(", ")]
+        return {(a, b): ((R[a] if a < len(R) else 0) >> b) & 1 for a in range(n) for b in range(m)}
     toks, i = [], 0
     while i < len(body):
         mm = TOKEN.match(body, i)
@@ -219,7 +224,9 @@ def rep_size(mod, st, timeout, parse_only=False):
 
 # ---- SAT ----
 
-def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate, sym=True):
+def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate, sym=True, distinct=False, fixed=(), max_not=None):
+    """fixed: the first gates, (op, inputs) each. distinct: every gate is non-constant and differs
+    from every earlier wire (inputs included) on some input."""
     nv = [0]
     def new():
         nv[0] += 1
@@ -262,8 +269,16 @@ def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate, sym=True):
         if isinstance(v, bool):
             return v if pos else not v
         return v if pos else -v
+    for j, (op, ins) in enumerate(fixed):
+        if j >= s:
+            add()  # more gates fixed than the circuit has: no such circuit
+            break
+        add({"and": A[j], "or": O[j], "not": N[j]}[op])
+        add(s1[j][ins[0]]); add(s2[j][ins[-1]])
+    X = []
     for r, val in rows.items():
         x = [(r >> i & 1) == 1 for i in range(n)] + [new() for _ in range(s)]
+        X.append(x)
         for j in range(s):
             g, v1, v2 = x[n + j], new(), new()
             for a in range(n + j):
@@ -274,6 +289,22 @@ def encode(n, s, rows, allow_not, none_dead, some_not, not_on_gate, sym=True):
             if allow_not:
                 add(-N[j], -g, -v1); add(-N[j], g, v1)
         add(x[n + s - 1] if val else -x[n + s - 1])
+    if allow_not and max_not is not None and max_not < s:  # at most max_not NOT gates
+        for sub in itertools.combinations(N, max_not + 1):
+            add(*[-v for v in sub])
+    if distinct:
+        for j in range(s):
+            g = n + j
+            add(*[x[g] for x in X]); add(*[-x[g] for x in X])  # not constant
+            for k in range(g):
+                if k < n:  # an input: g differs from it on some row
+                    add(*[-x[g] if x[k] else x[g] for x in X])
+                    continue
+                ds = []
+                for x in X:
+                    d = new(); ds.append(d)
+                    add(-d, x[g], x[k]); add(-d, -x[g], -x[k])
+                add(*ds)
     if none_dead:
         for j in range(s - 1):
             add(*[v for i in range(j + 1, s) for v in (s1[i][n + j], s2[i][n + j])])
@@ -304,7 +335,7 @@ def solve(n, s, rows, opts, timeout, tag):
     so the first decisive answer stands and the other run is stopped."""
     runs = []
     try:
-        for sym in (False, True):
+        for sym in ((False,) if opts.get("fixed") else (False, True)):
             nv, cls, decode = encode(n, s, rows, sym=sym, **opts)
             path = os.path.join(HERE, "out", "circ_%s_%d_%d_%d_%d.cnf" % (tag, s, sym, os.getpid(), threading.get_ident()))
             with open(path, "w") as f:
@@ -383,8 +414,39 @@ def exists(mod, st, timeout, parse_only=False):
         return None, "SKIP: not an ∃ C statement"
     parts = split_and(st[len(E):])
     n, rows, k, mono, fan, rb, dead, nng, some, someg = None, None, None, False, False, None, False, False, False, False
+    last, nf, distinct, fixed, wires, max_not = None, False, False, {}, set(), None
+    G = r"PEqualNP\.CircuitLowerBounds\.GateOp\."
     for p in parts:
         u = unparen(p)
+        mm = re.fullmatch(r"C\.gates((?:\.tail)*)\.head\? = some ⟨" + G + r"(and|or|not), \[(\d+)(?:, (\d+))?\]⟩", u)
+        if mm:
+            pos, op = mm.group(1).count(".tail"), mm.group(2)
+            ins = [int(mm.group(3))] + ([int(mm.group(4))] if mm.group(4) else [])
+            if pos in fixed or len(ins) != (1 if op == "not" else 2) or (op != "not" and ins[0] >= ins[1]):
+                return None, "SKIP: opening gate not in normal form: %s" % u[:80]
+            fixed[pos] = (op, ins)
+            continue
+        mm = re.fullmatch(r"PEqualNP\.NotBracket\.notCount C ≤ (\d+)", u)
+        if mm:
+            max_not = int(mm.group(1)); continue
+        mm = re.fullmatch(r"C\.output \+ 1 = (\d+) \+ C\.size", u)
+        if mm:
+            last = int(mm.group(1)); continue
+        mm = re.fullmatch(r"∀ j : Fin C\.gates\.length, \(\(C\.gates\.get j\)\.op = " + G + r"not ∧ ∃ a, a < (\d+) \+ j\.val ∧ "
+                          r"\(C\.gates\.get j\)\.inputs = \[a\]\) ∨ \(\(\(C\.gates\.get j\)\.op = " + G + r"and ∨ "
+                          r"\(C\.gates\.get j\)\.op = " + G + r"or\) ∧ ∃ a b, a < b ∧ b < \1 \+ j\.val ∧ "
+                          r"\(C\.gates\.get j\)\.inputs = \[a, b\]\)", u)
+        if mm:
+            nf = True; wires.add(int(mm.group(1))); continue
+        mm = re.fullmatch(r"∀ j : Fin C\.gates\.length, \(∃ x y : Fin (\d+) → Bool, \(C\.wires \(List\.ofFn x\)\)\.getD \(\1 \+ j\.val\) false ≠ "
+                          r"\(C\.wires \(List\.ofFn y\)\)\.getD \(\1 \+ j\.val\) false\) ∧ ∀ k, k < \1 \+ j\.val → ∃ x : Fin \1 → Bool, "
+                          r"\(C\.wires \(List\.ofFn x\)\)\.getD \(\1 \+ j\.val\) false ≠ \(C\.wires \(List\.ofFn x\)\)\.getD k false", u)
+        if mm:
+            distinct = True; wires.add(int(mm.group(1))); continue
+        mm = re.fullmatch(r"∀ j : Fin C\.gates\.length, j\.val \+ 1 < C\.gates\.length → ∃ k : Fin C\.gates\.length, j\.val < k\.val ∧ "
+                          r"(\d+) \+ j\.val ∈ \(C\.gates\.get k\)\.inputs", u)
+        if mm:
+            dead = True; wires.add(int(mm.group(1))); continue
         if p == "PEqualNP.MetaComplexity.Monotone2 C":
             mono = True
         elif p == "PEqualNP.MetaComplexity.FanInTwo C":
@@ -417,9 +479,22 @@ def exists(mod, st, timeout, parse_only=False):
         return None, "SKIP: ReadsBack on %d wires, function on %d" % (rb, n)
     if (nng or someg or some) and not fan:
         return None, "SKIP: NOT conditions on an AND/OR circuit"
-    opts = dict(allow_not=fan, none_dead=dead, some_not=some, not_on_gate=someg)
+    if (last is not None and last != n) or wires - {n}:
+        return None, "SKIP: wire numbering on another input count"
+    if fixed and sorted(fixed) != list(range(len(fixed))):
+        return None, "SKIP: opening gates with a gap"
+    if any(op == "not" for op, _ in fixed.values()) and not fan:
+        return None, "SKIP: a NOT opening gate on an AND/OR circuit"
+    if any(max(ins) >= n + j for j, (op, ins) in fixed.items()):
+        return None, "SKIP: an opening gate reads a later wire"
+    if max_not is not None and (some or someg) and max_not == 0:
+        return None, "SKIP: asks for a NOT gate and for none"
+    opts = dict(allow_not=fan, none_dead=dead, some_not=some, not_on_gate=someg, distinct=distinct,
+                fixed=tuple(fixed[j] for j in range(len(fixed))), max_not=max_not)
     if parse_only:
         return None, "PARSED: %d inputs, %d rows, k=%d" % (n, len(rows), k)
+    if fixed:
+        timeout = min(timeout, CUT_LIMIT)
     t0, gates, unsat = time.time(), None, []
     for s in range(k, 0, -1):
         left = timeout - (time.time() - t0)
@@ -436,9 +511,31 @@ def exists(mod, st, timeout, parse_only=False):
     assert all(evaluate(gates, n, r) == v for r, v in rows.items())
     holes = ", ".join(["?_"] * len(parts))
     g = ", ".join("⟨.%s, [%s]⟩" % (op, ", ".join(map(str, ins))) for op, ins in gates)
-    body = "  refine ⟨⟨[%s], %d⟩, %s⟩\n%s" % (g, n + len(gates) - 1, holes, "".join("  · %s\n" % tactic(p) for p in parts))
+    body = "  refine ⟨⟨[%s], %d⟩, %s⟩\n%s" % (g, n + len(gates) - 1, holes,
+                                             "".join("  · %s\n" % nf_tactic(p, gates, n) for p in parts))
     return HEADER + "theorem PEqualNP.Outside.%s : %s := by\n%s" % (mod, st, body), \
         "exists, %d inputs, %d gates (k=%d)" % (n, len(gates), k)
+
+
+def nf_tactic(p, gates, n):
+    """The tactic for one condition of an exists step. The normal-form clause has an unbounded
+    ∃ a b, so decide cannot take it: each gate gets its witnesses, matched on its index.
+    The opening-gate clauses hold by computation (rfl)."""
+    u = unparen(p)
+    if re.fullmatch(r"C\.gates(?:\.tail)*\.head\? = some ⟨.*⟩", u):
+        return "rfl"
+    if u.startswith("∀ j : Fin C.gates.length, ((C.gates.get j).op = PEqualNP.CircuitLowerBounds.GateOp.not ∧ ∃ a, a < "):
+        arms = []
+        for j, (op, ins) in enumerate(gates):
+            lt = "by show %d < %d + %d; decide" % (ins[-1], n, j)  # j.val carries its bound proof: decide wants it gone
+            if op == "not":
+                arms.append("| ⟨%d, _⟩ => exact Or.inl ⟨rfl, %d, %s, rfl⟩" % (j, ins[0], lt))
+            else:
+                arms.append("| ⟨%d, _⟩ => exact Or.inr ⟨Or.%s rfl, %d, %d, by decide, %s, rfl⟩"
+                            % (j, "inl" if op == "and" else "inr", ins[0], ins[1], lt))
+        arms.append("| ⟨_ + %d, h⟩ => simp at h" % len(gates))
+        return "intro j\n    match j with\n    " + "\n    ".join(arms)
+    return tactic(p)
 
 
 def parses(st):

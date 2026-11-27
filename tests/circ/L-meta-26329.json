@@ -1,0 +1,5 @@
+{
+ "id": "L-meta-26329",
+ "title": "5 by 5 graph, rows 0, 0, 1, 14, 14: an AND/OR/NOT circuit of fan-in two with at most 5 gates represents it",
+ "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.FanInTwo C ∧ C.size ≤ 5 ∧ PEqualNP.Represents.Represents (fun (u : Fin 5) (v : Fin 5) => (([0, 0, 1, 14, 14] : List ℕ).getD u.val 0).testBit v.val) C"
+}

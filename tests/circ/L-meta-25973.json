@@ -1,0 +1,5 @@
+{
+ "id": "L-meta-25973",
+ "title": "4 by 4 graph, rows 14, 2, 1, 1: an AND/OR/NOT circuit of fan-in two, at most 7 gates, at most 1 of them NOT, represents it",
+ "statement": "∃ C : PEqualNP.CircuitLowerBounds.Circuit, PEqualNP.MetaComplexity.FanInTwo C ∧ C.size ≤ 7 ∧ PEqualNP.NotBracket.notCount C ≤ 1 ∧ PEqualNP.Represents.Represents (fun (u : Fin 4) (v : Fin 4) => (([14, 2, 1, 1] : List ℕ).getD u.val 0).testBit v.val) C"
+}

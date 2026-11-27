@@ -9,7 +9,7 @@ the file it returns has passed Lean, and pnp.sh check builds it again before any
 usage: battery.py --json <lease json> [--out FILE] [--timeout 300]
        battery.py --id L-gct-126 --statement-file st.txt [--import PEqualNP.Defs ...]
 Prints PROOF: ... on success (exit 0), NO PROOF: ... otherwise (exit 1)."""
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "pequalnp-proofs"))
@@ -59,12 +59,23 @@ def prove(gid, st, imports=None, timeout=300):
     path = os.path.join(WORK, mod + "_battery.lean")
     open(path, "w", encoding="utf-8").write(text)
     t0 = time.time()
+    # lake starts lean as its own child: killing lake alone left lean running for an hour. Lean runs in
+    # its own process group, and a timeout, or a kill of this script, stops the whole group.
+    p = subprocess.Popen(["lake", "env", "lean", path], cwd=os.path.join(REPO, "lean"), stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, start_new_session=True)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
-        r = subprocess.run(["lake", "env", "lean", path], cwd=os.path.join(REPO, "lean"), capture_output=True,
-                           text=True, timeout=timeout)
-        out = r.stdout + r.stderr
+        so, se = p.communicate(timeout=timeout)
+        out = so + se
     except subprocess.TimeoutExpired:
         return None, "NO PROOF: the battery ran past %ds" % timeout
+    finally:
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
     bad = set()
     for m in re.finditer(r":(\d+):\d+: error", out):
         ln = int(m.group(1))
