@@ -16,7 +16,7 @@ make it skip the step.
 usage: gen_circ.py --id L-meta-N --statement-file F [--out FILE] [--timeout S]
        gen_circ.py --json <.pnp/L-meta-N.json> [--out FILE]
 Prints one verdict line (PROOF / NO PROOF / SKIP)."""
-import argparse, itertools, json, os, re, subprocess, sys, time, threading
+import argparse, itertools, json, os, re, signal, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -564,6 +564,8 @@ def generate(gid, st, timeout=600):
 
 
 def main():
+    # the agent stops a slot with SIGTERM: exit through solve()'s finally, which stops CaDiCaL and removes its files
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     ap = argparse.ArgumentParser()
     ap.add_argument("--json")
     ap.add_argument("--id")

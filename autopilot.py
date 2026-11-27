@@ -209,6 +209,16 @@ def recover():
     """Undo what a crash or a kill can leave behind: another branch checked out, a lease held, an
     untracked proof file in the fork. Only untracked files under Outside/ are ever deleted."""
     subprocess.run(["git", "checkout", "-q", "main"], cwd=REPO)
+    # a slot's generator runs in its own session, so a restart of this agent leaves it (and its SAT
+    # solvers) working for a step that is handed back below: stop each one's whole process group
+    pg = subprocess.run(["pgrep", "-f", "--", "--out " + SLOTS + os.sep], capture_output=True, text=True)
+    for pid in map(int, pg.stdout.split()):
+        try:
+            if os.getpgid(pid) == pid:
+                log("recovering: stopping a leftover generator (pid %d)" % pid)
+                os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     for gid in held():
         log("recovering: handing back %s" % gid)
         release(gid, "other")
